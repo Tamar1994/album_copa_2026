@@ -1,0 +1,27 @@
+# Environment
+.env
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+
+# Fotos do álbum (arquivos grandes, não vão para o repo)
+Photos-3-001/
+imagens_exemplo/
+
+# Scripts utilitários locais
+ocr_album.py
+player_names_raw.json
+
+# Python venv
+.venv/
