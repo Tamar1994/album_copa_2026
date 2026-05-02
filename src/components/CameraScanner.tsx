@@ -36,18 +36,31 @@ interface ScanResult {
 
 // ─── Image preprocessing helpers ─────────────────────────────────────────────
 /**
- * Resize the video frame to 640px wide and apply grayscale + contrast filter.
- * We don't crop so any position of the code in frame is readable.
+ * Crop to the guide-box region (70 % wide × 30 % tall, centred) then
+ * scale up to 640 px wide and apply sharpening filters.
+ * Processing only the small ROI removes background noise (player faces,
+ * kit colours) that confuses Tesseract.
  */
 function preprocessCanvas(src: HTMLVideoElement): HTMLCanvasElement {
-  const W = 640;
-  const H = Math.round((W / src.videoWidth) * src.videoHeight);
+  const vw = src.videoWidth;
+  const vh = src.videoHeight;
+
+  // Crop region — matches the 70 % × 30 % yellow box in the UI
+  const cropW = Math.round(vw * 0.70);
+  const cropH = Math.round(vh * 0.30);
+  const cropX = Math.round((vw - cropW) / 2);
+  const cropY = Math.round((vh - cropH) / 2);
+
+  // Scale up to 640 px wide so small text becomes legible
+  const outW = 640;
+  const outH = Math.round((outW / cropW) * cropH);
+
   const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
+  canvas.width = outW;
+  canvas.height = outH;
   const ctx = canvas.getContext('2d')!;
-  ctx.filter = 'grayscale(1) contrast(2) brightness(1.1)';
-  ctx.drawImage(src, 0, 0, W, H);
+  ctx.filter = 'grayscale(1) contrast(2.5) brightness(1.2)';
+  ctx.drawImage(src, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
   return canvas;
 }
 
@@ -73,8 +86,29 @@ function invertCanvas(src: HTMLCanvasElement): HTMLCanvasElement {
 }
 
 /**
+ * Common single-character OCR substitutions.
+ * Returns the original string plus every 1-character-fix variant.
+ */
+function ocrVariants(s: string): string[] {
+  const fixes: Record<string, string> = {
+    '0': 'O', 'O': '0',
+    '1': 'I', 'I': '1', 'L': '1',
+    '5': 'S', 'S': '5',
+    '8': 'B', 'B': '8',
+    '6': 'G', 'G': '6',
+  };
+  const out = new Set<string>([s]);
+  for (let i = 0; i < s.length; i++) {
+    const alt = fixes[s[i]];
+    if (alt) out.add(s.slice(0, i) + alt + s.slice(i + 1));
+  }
+  return [...out];
+}
+
+/**
  * Extract a sticker code from OCR text.
  * Handles formats: "MEX 5", "MEX5", "FWC 3", "CC2", "00"
+ * Applies fuzzy OCR fixes (0↔O, 1↔I/L, 5↔S, 8↔B) before giving up.
  */
 function extractStickerCode(text: string): string | null {
   const upper = text.toUpperCase();
@@ -82,14 +116,21 @@ function extractStickerCode(text: string): string | null {
   // Special case: bare "00"
   if (/\b00\b/.test(upper) && STICKER_CODE_MAP.has('00')) return '00';
 
-  // Match: 2-3 uppercase letters + optional whitespace + 1-2 digits
-  const re = /\b([A-Z]{2,3})\s*(\d{1,2})\b/g;
+  // Allow digits in letter group too (OCR may read O as 0, etc.)
+  const re = /\b([A-Z0-9]{2,3})\s*([0-9ILO]{1,2})\b/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(upper)) !== null) {
-    const withSpace = `${m[1]} ${m[2]}`;
-    const noSpace   = `${m[1]}${m[2]}`;
-    if (STICKER_CODE_MAP.has(withSpace)) return withSpace;
-    if (STICKER_CODE_MAP.has(noSpace))   return noSpace;
+    const rawLetters = m[1];
+    const rawDigits  = m[2];
+    // Try all single-character fix variants for letters × digits
+    for (const letters of ocrVariants(rawLetters)) {
+      for (const digits of ocrVariants(rawDigits)) {
+        const withSpace = `${letters} ${digits}`;
+        const noSpace   = `${letters}${digits}`;
+        if (STICKER_CODE_MAP.has(withSpace)) return withSpace;
+        if (STICKER_CODE_MAP.has(noSpace))   return noSpace;
+      }
+    }
   }
   return null;
 }
