@@ -6,6 +6,10 @@ import { ProgressCard } from './components/ProgressCard';
 import { AlbumView } from './components/AlbumView';
 import { CameraScanner } from './components/CameraScanner';
 import { AdBanner } from './components/AdBanner';
+
+// Substitui pelos IDs reais após aprovação do AdSense
+const ADSENSE_CLIENT = '';
+const ADSENSE_SLOT = '';
 import { LoginScreen } from './components/LoginScreen';
 import { googleLogout } from '@react-oauth/google';
 import { Loader2, WifiOff, LogOut } from 'lucide-react';
@@ -127,12 +131,14 @@ export default function App() {
         </div>
       </header>
 
-      {/* Ad banner — substituir pelos IDs reais após aprovação AdSense */}
-      <AdBanner
-        adClient="YOUR_PUB_ID"
-        adSlot="YOUR_AD_SLOT"
-        className="h-[50px] flex-shrink-0"
-      />
+      {/* Ad banner — só renderiza quando AdSense estiver aprovado */}
+      {ADSENSE_CLIENT && ADSENSE_SLOT && (
+        <AdBanner
+          adClient={ADSENSE_CLIENT}
+          adSlot={ADSENSE_SLOT}
+          className="h-[50px] flex-shrink-0"
+        />
+      )}
 
       {/* Content */}
       <main className="flex flex-col flex-1 min-h-0 overflow-hidden">
