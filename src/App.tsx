@@ -127,11 +127,10 @@ export default function App() {
         </div>
       </header>
 
-      {/* Ad banner — below header, above content (320×50) */}
+      {/* Ad banner — substituir pelos IDs reais após aprovação AdSense */}
       <AdBanner
-        slotId="/YOUR_NETWORK_CODE/album_copa_top"
-        elementId="ad-top-banner"
-        sizes={[320, 50]}
+        adClient="YOUR_PUB_ID"
+        adSlot="YOUR_AD_SLOT"
         className="h-[50px] flex-shrink-0"
       />
 
