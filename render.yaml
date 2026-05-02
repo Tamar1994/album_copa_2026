@@ -8,3 +8,7 @@ services:
     envVars:
       - key: MONGODB_URI
         sync: false   # set manually in Render dashboard
+      - key: GOOGLE_CLIENT_ID
+        value: 515218344817-8ebbhp0e61gtjns1c0idqpfmof43vls0.apps.googleusercontent.com
+      - key: VITE_GOOGLE_CLIENT_ID
+        value: 515218344817-8ebbhp0e61gtjns1c0idqpfmof43vls0.apps.googleusercontent.com

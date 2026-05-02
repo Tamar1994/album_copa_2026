@@ -6,13 +6,14 @@ interface Props {
   /** DOM element ID (must be unique per page) */
   elementId: string;
   /** Ad size(s), e.g. [320, 50] or [[320,50],[320,100]] */
-  sizes: googletag.GeneralSize;
+  sizes: [number, number] | [number, number][];
   className?: string;
 }
 
 declare global {
   interface Window {
-    googletag: typeof googletag;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    googletag: any;
   }
 }
 
@@ -41,7 +42,8 @@ export function AdBanner({ slotId, elementId, sizes, className = '' }: Props) {
       // Clean up slot on unmount so remounts don't double-define
       gt.cmd.push(() => {
         const slots = gt.pubads().getSlots();
-        const slot = slots.find((s) => s.getSlotElementId() === elementId);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const slot = slots.find((s: any) => s.getSlotElementId() === elementId);
         if (slot) gt.destroySlots([slot]);
       });
     };

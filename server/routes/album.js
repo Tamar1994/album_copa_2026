@@ -3,10 +3,10 @@ import { Album } from '../models/Album.js';
 
 const router = Router();
 
-/** Get or create the singleton album document */
-async function getAlbum() {
+/** Get or create album document for the authenticated user */
+async function getAlbum(userId) {
   const album = await Album.findOneAndUpdate(
-    { albumId: 'main' },
+    { userId },
     { $setOnInsert: { ownedStickers: [] } },
     { new: true, upsert: true },
   );
@@ -14,9 +14,9 @@ async function getAlbum() {
 }
 
 // GET /api/album
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const album = await getAlbum();
+    const album = await getAlbum(req.userId);
     res.json({ ownedStickers: album.ownedStickers });
   } catch {
     res.status(500).json({ error: 'Server error' });
@@ -31,7 +31,7 @@ router.post('/sticker', async (req, res) => {
   }
   try {
     const album = await Album.findOneAndUpdate(
-      { albumId: 'main' },
+      { userId: req.userId },
       { $addToSet: { ownedStickers: number } },
       { new: true, upsert: true },
     );
@@ -49,7 +49,7 @@ router.delete('/sticker/:number', async (req, res) => {
   }
   try {
     const album = await Album.findOneAndUpdate(
-      { albumId: 'main' },
+      { userId: req.userId },
       { $pull: { ownedStickers: number } },
       { new: true, upsert: true },
     );
@@ -70,7 +70,7 @@ router.post('/stickers/bulk', async (req, res) => {
   );
   try {
     const album = await Album.findOneAndUpdate(
-      { albumId: 'main' },
+      { userId: req.userId },
       { $addToSet: { ownedStickers: { $each: valid } } },
       { new: true, upsert: true },
     );

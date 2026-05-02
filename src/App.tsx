@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { Tab } from './types';
 import { useAlbum } from './hooks/useAlbum';
 import { Navigation } from './components/Navigation';
@@ -6,10 +6,44 @@ import { ProgressCard } from './components/ProgressCard';
 import { AlbumView } from './components/AlbumView';
 import { CameraScanner } from './components/CameraScanner';
 import { AdBanner } from './components/AdBanner';
-import { Loader2, WifiOff } from 'lucide-react';
+import { LoginScreen } from './components/LoginScreen';
+import { googleLogout } from '@react-oauth/google';
+import { Loader2, WifiOff, LogOut } from 'lucide-react';
+
+function isTokenExpired(token: string): boolean {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return Date.now() >= payload.exp * 1000;
+  } catch {
+    return true;
+  }
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('progresso');
+  const [token, setToken] = useState<string | null>(() => {
+    const stored = localStorage.getItem('google_token');
+    if (stored && !isTokenExpired(stored)) return stored;
+    localStorage.removeItem('google_token');
+    return null;
+  });
+
+  const handleLogin = useCallback((newToken: string) => {
+    localStorage.setItem('google_token', newToken);
+    setToken(newToken);
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    googleLogout();
+    localStorage.removeItem('google_token');
+    setToken(null);
+  }, []);
+
+  const handleUnauthorized = useCallback(() => {
+    localStorage.removeItem('google_token');
+    setToken(null);
+  }, []);
+
   const {
     owned,
     loading,
@@ -20,7 +54,12 @@ export default function App() {
     totalOwned,
     totalStickers,
     progressPercent,
-  } = useAlbum();
+  } = useAlbum(token, handleUnauthorized);
+
+  // ── Not logged in ─────────────────────────────────────────────────────────
+  if (!token) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
 
   // ── Loading state ─────────────────────────────────────────────────────────
   if (loading) {
@@ -70,12 +109,21 @@ export default function App() {
           </div>
         </div>
 
-        {/* Mini progress bar */}
-        <div className="w-24 h-2 bg-zinc-800 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-copa-green rounded-full transition-all duration-500"
-            style={{ width: `${progressPercent}%` }}
-          />
+        {/* Mini progress bar + logout */}
+        <div className="flex items-center gap-2">
+          <div className="w-24 h-2 bg-zinc-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-copa-green rounded-full transition-all duration-500"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+          <button
+            onClick={handleLogout}
+            className="p-1.5 text-zinc-500 hover:text-zinc-300 active:scale-90 transition-transform"
+            aria-label="Sair"
+          >
+            <LogOut size={16} />
+          </button>
         </div>
       </header>
 
