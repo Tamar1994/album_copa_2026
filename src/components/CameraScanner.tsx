@@ -23,8 +23,6 @@ type ScanState =
   | 'idle'
   | 'requesting-camera'
   | 'ready'
-  | 'capturing'
-  | 'processing'
   | 'result'
   | 'error';
 
@@ -106,29 +104,26 @@ function ocrVariants(s: string): string[] {
 }
 
 /**
- * Extract a sticker code from OCR text.
- * Handles formats: "MEX 5", "MEX5", "FWC 3", "CC2", "00"
- * Applies fuzzy OCR fixes (0↔O, 1↔I/L, 5↔S, 8↔B) before giving up.
+ * Extract a sticker code by cross-matching every letter group with every
+ * digit group found in the text, with fuzzy OCR fixes on both sides.
+ * E.g. text "RSA 1 MEX 5" → tries RSA×1, RSA×5, MEX×1, MEX×5.
  */
-function extractStickerCode(text: string): string | null {
-  const upper = text.toUpperCase();
-
+function extractStickerCode(lettersText: string, digitsText: string): string | null {
   // Special case: bare "00"
-  if (/\b00\b/.test(upper) && STICKER_CODE_MAP.has('00')) return '00';
+  if (/\b00\b/.test(digitsText) && STICKER_CODE_MAP.has('00')) return '00';
 
-  // Allow digits in letter group too (OCR may read O as 0, etc.)
-  const re = /\b([A-Z0-9]{2,3})\s*([0-9ILO]{1,2})\b/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(upper)) !== null) {
-    const rawLetters = m[1];
-    const rawDigits  = m[2];
-    // Try all single-character fix variants for letters × digits
-    for (const letters of ocrVariants(rawLetters)) {
-      for (const digits of ocrVariants(rawDigits)) {
-        const withSpace = `${letters} ${digits}`;
-        const noSpace   = `${letters}${digits}`;
-        if (STICKER_CODE_MAP.has(withSpace)) return withSpace;
-        if (STICKER_CODE_MAP.has(noSpace))   return noSpace;
+  const letterGroups = [...lettersText.toUpperCase().matchAll(/[A-Z]{2,3}/g)].map((m) => m[0]);
+  const digitGroups  = [...digitsText.matchAll(/\d{1,2}/g)].map((m) => m[0]);
+
+  for (const raw3 of letterGroups) {
+    for (const lv of ocrVariants(raw3)) {
+      for (const rawD of digitGroups) {
+        for (const dv of ocrVariants(rawD)) {
+          const withSpace = `${lv} ${dv}`;
+          const noSpace   = `${lv}${dv}`;
+          if (STICKER_CODE_MAP.has(withSpace)) return withSpace;
+          if (STICKER_CODE_MAP.has(noSpace))   return noSpace;
+        }
       }
     }
   }
@@ -146,7 +141,10 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
   const [errorMsg, setErrorMsg] = useState('');
   const [manualCode, setManualCode] = useState('');
   const [showManual, setShowManual] = useState(false);
-  const [ocrProgress, setOcrProgress] = useState(0);
+
+  // Refs for silent background scanning
+  const isScanning = useRef(false);
+  const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Teardown ─────────────────────────────────────────────────────────────
   const stopCamera = useCallback(() => {
@@ -158,18 +156,23 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
     return () => {
       stopCamera();
       workerRef.current?.terminate();
+      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
     };
   }, [stopCamera]);
 
   // captureRef: always points to the latest capture fn (avoids stale closure in timer)
   const captureRef = useRef<() => void>(() => {});
 
-  // Auto-scan: 1 s after the camera is ready (and manual entry isn’t open),
-  // automatically attempt recognition so the user never needs to tap “Capturar”.
+  // Start the silent scan loop when camera is ready
   useEffect(() => {
-    if (scanState !== 'ready' || showManual) return;
-    const id = setTimeout(() => captureRef.current(), 1000);
-    return () => clearTimeout(id);
+    if (scanState !== 'ready' || showManual) {
+      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
+      return;
+    }
+    scanTimerRef.current = setTimeout(() => captureRef.current(), 600);
+    return () => {
+      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
+    };
   }, [scanState, showManual]);
 
   // ── Start camera ─────────────────────────────────────────────────────────
@@ -201,15 +204,10 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
         });
       }
 
-      // Init Tesseract worker (digits only)
+      // Init Tesseract worker
       if (!workerRef.current) {
-        const worker = await createWorker('eng', 1, {
-          logger: (m) => {
-            if (m.status === 'recognizing text') {
-              setOcrProgress(Math.round((m.progress ?? 0) * 100));
-            }
-          },
-        });
+        const worker = await createWorker('eng', 1, {});
+        // Default whitelist — will be overridden per-pass during scan
         await worker.setParameters({
           tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ',
         });
@@ -226,42 +224,52 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
     }
   }, []);
 
-  // ── Capture & OCR ────────────────────────────────────────────────────────
+  // ── Capture & OCR (runs silently in background) ─────────────────────────
   const capture = useCallback(async () => {
-    if (!videoRef.current || !workerRef.current) return;
-    setScanState('capturing');
-
-    // Short delay so user sees feedback
-    await new Promise((r) => setTimeout(r, 150));
-    setScanState('processing');
-    setOcrProgress(0);
+    if (!videoRef.current || !workerRef.current || isScanning.current) return;
+    isScanning.current = true;
 
     try {
       const canvas = preprocessCanvas(videoRef.current);
-      const { data } = await workerRef.current.recognize(canvas);
-      const raw = data.text ?? '';
-      let code = extractStickerCode(raw);
+      const worker = workerRef.current;
 
-      // Sticker codes are often white-on-dark (e.g. RSA 19 label).
-      // Try again with inverted colours — Tesseract reads black-on-white better.
+      // Pass 1: letters only
+      await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' });
+      const { data: dataL } = await worker.recognize(canvas);
+
+      // Pass 2: digits only
+      await worker.setParameters({ tessedit_char_whitelist: '0123456789' });
+      const { data: dataD } = await worker.recognize(canvas);
+
+      // Restore combined whitelist
+      await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' });
+
+      let code = extractStickerCode(dataL.text ?? '', dataD.text ?? '');
+
+      // Retry with inverted image (white-on-dark codes)
       if (code === null) {
         const inv = invertCanvas(canvas);
-        const { data: data2 } = await workerRef.current.recognize(inv);
-        code = extractStickerCode(data2.text ?? '');
+        await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' });
+        const { data: dataL2 } = await worker.recognize(inv);
+        await worker.setParameters({ tessedit_char_whitelist: '0123456789' });
+        const { data: dataD2 } = await worker.recognize(inv);
+        await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' });
+        code = extractStickerCode(dataL2.text ?? '', dataD2.text ?? '');
       }
 
-      if (code === null) {
-        // Auto-scan will retry in 1 s — no popup needed
-        setScanState('ready');
-        return;
+      if (code !== null) {
+        const sticker = STICKER_CODE_MAP.get(code)!;
+        setResult({ sticker, alreadyOwned: owned.has(sticker.number), rawText: `${dataL.text?.trim()} ${dataD.text?.trim()}` });
+        setScanState('result');
+      } else {
+        // Schedule next silent scan
+        scanTimerRef.current = setTimeout(() => captureRef.current(), 700);
       }
-
-      const sticker = STICKER_CODE_MAP.get(code)!;
-      setResult({ sticker, alreadyOwned: owned.has(sticker.number), rawText: raw });
-      setScanState('result');
     } catch (err) {
       console.error(err);
-      setScanState('ready'); // auto-scan will retry
+      scanTimerRef.current = setTimeout(() => captureRef.current(), 1000);
+    } finally {
+      isScanning.current = false;
     }
   }, [owned]);
 
@@ -310,9 +318,7 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
   // Whether the camera viewport should be visible
   const cameraActive =
     scanState === 'requesting-camera' ||
-    scanState === 'ready' ||
-    scanState === 'capturing' ||
-    scanState === 'processing';
+    scanState === 'ready';
 
   return (
     <div className="flex flex-col flex-1 min-h-0 relative bg-black">
@@ -371,35 +377,21 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
           )}
 
           {/* Guide overlay */}
-          {(scanState === 'ready' || scanState === 'capturing') && (
+          {scanState === 'ready' && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="w-[70%] h-[30%] border-2 border-copa-yellow rounded-lg relative">
                 <span className="absolute -top-5 left-0 right-0 text-center text-[10px] text-copa-yellow font-semibold">
                   Posicione o código aqui
                 </span>
-                {scanState === 'ready' && (
-                  <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-copa-yellow animate-pulse">
-                    ● Escaneando automaticamente…
-                  </span>
-                )}
+                {/* Subtle pulsing dot — scanning happens silently in background */}
+                <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-copa-yellow">
+                  <span className="inline-block w-2 h-2 rounded-full bg-copa-yellow animate-pulse mr-1" />
+                  Escaneando…
+                </span>
               </div>
             </div>
           )}
 
-          {/* Processing overlay */}
-          {scanState === 'processing' && (
-            <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-3">
-              <Loader2 size={40} className="animate-spin text-copa-green" />
-              <p className="text-white text-sm font-medium">
-                Lendo figurinha… {ocrProgress}%
-              </p>
-            </div>
-          )}
-
-          {/* Capture flash */}
-          {scanState === 'capturing' && (
-            <div className="absolute inset-0 bg-white/30 pointer-events-none" />
-          )}
         </div>
 
         {/* Controls */}
@@ -444,24 +436,10 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
 
             <button
               onClick={capture}
-              disabled={scanState !== 'ready'}
-              className={`flex-1 py-4 rounded-2xl font-bold text-base transition-transform active:scale-95 flex items-center justify-center gap-2 ${
-                scanState !== 'ready'
-                  ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed'
-                  : 'bg-copa-green text-white'
-              }`}
+              className="flex-1 py-4 rounded-2xl font-bold text-base transition-transform active:scale-95 flex items-center justify-center gap-2 bg-copa-green text-white"
             >
-              {scanState === 'processing' ? (
-                <>
-                  <Loader2 size={20} className="animate-spin" />
-                  Processando…
-                </>
-              ) : (
-                <>
-                  <Camera size={20} />
-                  Capturar
-                </>
-              )}
+              <Camera size={20} />
+              Capturar
             </button>
 
             <button
