@@ -34,20 +34,41 @@ interface ScanResult {
 
 // ─── Image preprocessing helpers ─────────────────────────────────────────────
 /**
- * Crop to the guide-box region (70 % wide × 30 % tall, centred) then
- * scale up to 640 px wide and apply sharpening filters.
- * Processing only the small ROI removes background noise (player faces,
- * kit colours) that confuses Tesseract.
+ * Crop to the badge zone in the upper-right of the sticker guide box.
+ * The guide box is 75 % wide × 60 % tall, centred in the frame.
+ * The badge ("FWC 10", "RSA 1", …) is always in the upper-right corner
+ * of the sticker, occupying roughly the right 40 % × top 28 % of the guide.
+ *
+ *  Frame:  ┌────────────────────────────┐
+ *          │  12.5%          75%        │
+ *          │  ┌──────────────────────┐  │  ← guide top (20 % from top)
+ *          │  │              ┌──────┐│  │
+ *          │  │              │badge ││  │  ← upper-right 40 % × 28 %
+ *          │  │              └──────┘│  │
+ *          │  │                     │  │
+ *          │  └──────────────────────┘  │  ← guide bottom (80 % from top)
+ *          └────────────────────────────┘
+ *
+ * Using a narrow ROI removes all the face/kit noise that surrounds the badge.
+ * High contrast (4×) acts as a soft binariser so both badge variants work:
+ *   – dark badge / white text  → invert pass
+ *   – white badge / black text → normal pass
  */
 function preprocessCanvas(src: HTMLVideoElement): HTMLCanvasElement {
   const vw = src.videoWidth;
   const vh = src.videoHeight;
 
-  // Crop region — matches the 70 % × 30 % yellow box in the UI
-  const cropW = Math.round(vw * 0.70);
-  const cropH = Math.round(vh * 0.30);
-  const cropX = Math.round((vw - cropW) / 2);
-  const cropY = Math.round((vh - cropH) / 2);
+  // Guide box: 75 % wide × 60 % tall, centred
+  const guideX = vw * 0.125;
+  const guideY = vh * 0.20;
+  const guideW = vw * 0.75;
+  const guideH = vh * 0.60;
+
+  // Badge zone: right 40 % × top 28 % of the guide box
+  const cropX = Math.round(guideX + guideW * 0.60);
+  const cropY = Math.round(guideY);
+  const cropW = Math.round(guideW * 0.40);
+  const cropH = Math.round(guideH * 0.28);
 
   // Scale up to 640 px wide so small text becomes legible
   const outW = 640;
@@ -57,7 +78,8 @@ function preprocessCanvas(src: HTMLVideoElement): HTMLCanvasElement {
   canvas.width = outW;
   canvas.height = outH;
   const ctx = canvas.getContext('2d')!;
-  ctx.filter = 'grayscale(1) contrast(2.5) brightness(1.2)';
+  // contrast(4) softly binarises the badge; brightness(1.1) lifts mid-tones
+  ctx.filter = 'grayscale(1) contrast(4) brightness(1.1)';
   ctx.drawImage(src, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
   return canvas;
 }
@@ -367,16 +389,34 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
 
           {/* Guide overlay */}
           {scanState === 'ready' && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-[70%] h-[30%] border-2 border-copa-yellow rounded-lg relative">
-                <span className="absolute -top-5 left-0 right-0 text-center text-[10px] text-copa-yellow font-semibold">
-                  Posicione o código aqui
-                </span>
-                {/* Subtle pulsing dot — scanning happens silently in background */}
-                <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-copa-yellow">
-                  <span className="inline-block w-2 h-2 rounded-full bg-copa-yellow animate-pulse mr-1" />
-                  Escaneando…
-                </span>
+            <div className="absolute inset-0 pointer-events-none">
+              {/* Semi-dark vignette so the sticker pops */}
+              <div className="absolute inset-0 bg-black/35" />
+
+              {/* Sticker guide — 75 % wide × 60 % tall, centred */}
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="w-[75%] h-[60%] border-2 border-white/50 rounded-lg relative">
+
+                  {/* Label above the box */}
+                  <span className="absolute -top-5 left-0 right-0 text-center text-[10px] text-white font-semibold">
+                    Encaixe a figurinha aqui
+                  </span>
+
+                  {/* Badge zone highlight — upper-right 40 % × 28 % */}
+                  <div className="absolute top-0 right-0 w-[40%] h-[28%] border-2 border-copa-yellow rounded-tr-md">
+                    {/* Corner tick marks */}
+                    <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-copa-yellow -translate-x-0.5 -translate-y-0.5" />
+                    <span className="absolute -top-4 right-0 text-[9px] text-copa-yellow font-bold whitespace-nowrap">
+                      código ↗
+                    </span>
+                  </div>
+
+                  {/* Scanning pulse at the bottom */}
+                  <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-copa-yellow">
+                    <span className="inline-block w-2 h-2 rounded-full bg-copa-yellow animate-pulse mr-1" />
+                    Escaneando…
+                  </span>
+                </div>
               </div>
             </div>
           )}
