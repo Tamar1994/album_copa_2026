@@ -245,6 +245,7 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
       await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' });
 
       let code = extractStickerCode(dataL.text ?? '', dataD.text ?? '');
+      console.log('[OCR normal] letras:', JSON.stringify(dataL.text?.trim()), '| dígitos:', JSON.stringify(dataD.text?.trim()), '| código:', code);
 
       // Retry with inverted image (white-on-dark codes)
       if (code === null) {
@@ -255,6 +256,7 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
         const { data: dataD2 } = await worker.recognize(inv);
         await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' });
         code = extractStickerCode(dataL2.text ?? '', dataD2.text ?? '');
+        console.log('[OCR invertido] letras:', JSON.stringify(dataL2.text?.trim()), '| dígitos:', JSON.stringify(dataD2.text?.trim()), '| código:', code);
       }
 
       if (code !== null) {
