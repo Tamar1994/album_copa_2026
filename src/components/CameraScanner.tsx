@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createWorker, PSM } from 'tesseract.js';
 import { STICKER_CODE_MAP } from '../data/stickers';
 import type { Sticker } from '../types';
 import {
@@ -17,12 +16,14 @@ interface Props {
   mode: 'verificar' | 'adicionar';
   owned: Set<number>;
   onAdd: (num: number) => void;
+  token: string | null;
 }
 
 type ScanState =
   | 'idle'
   | 'requesting-camera'
   | 'ready'
+  | 'scanning'
   | 'result'
   | 'error';
 
@@ -78,31 +79,10 @@ function preprocessCanvas(src: HTMLVideoElement): HTMLCanvasElement {
   canvas.width = outW;
   canvas.height = outH;
   const ctx = canvas.getContext('2d')!;
-  // contrast(4) softly binarises the badge; brightness(1.1) lifts mid-tones
-  ctx.filter = 'grayscale(1) contrast(4) brightness(1.1)';
+  // Light sharpening only — Vision API reads both dark and light badges natively
+  ctx.filter = 'grayscale(1) contrast(1.8) brightness(1.05)';
   ctx.drawImage(src, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
   return canvas;
-}
-
-/**
- * Return a pixel-inverted copy of a canvas.
- * Tesseract reads black-on-white better; sticker codes are often
- * white-on-dark, so this gives a second chance.
- */
-function invertCanvas(src: HTMLCanvasElement): HTMLCanvasElement {
-  const inv = document.createElement('canvas');
-  inv.width = src.width;
-  inv.height = src.height;
-  const ctx = inv.getContext('2d')!;
-  ctx.drawImage(src, 0, 0);
-  const d = ctx.getImageData(0, 0, inv.width, inv.height);
-  for (let i = 0; i < d.data.length; i += 4) {
-    d.data[i]     = 255 - d.data[i];
-    d.data[i + 1] = 255 - d.data[i + 1];
-    d.data[i + 2] = 255 - d.data[i + 2];
-  }
-  ctx.putImageData(d, 0, 0);
-  return inv;
 }
 
 /**
@@ -153,20 +133,16 @@ function extractStickerCode(text: string): string | null {
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
-export function CameraScanner({ mode, owned, onAdd }: Props) {
+export function CameraScanner({ mode, owned, onAdd, token }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const workerRef = useRef<Awaited<ReturnType<typeof createWorker>> | null>(null);
+  const isScanning = useRef(false);
 
   const [scanState, setScanState] = useState<ScanState>('idle');
   const [result, setResult] = useState<ScanResult | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [manualCode, setManualCode] = useState('');
   const [showManual, setShowManual] = useState(false);
-
-  // Refs for silent background scanning
-  const isScanning = useRef(false);
-  const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Teardown ─────────────────────────────────────────────────────────────
   const stopCamera = useCallback(() => {
@@ -175,27 +151,8 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
   }, []);
 
   useEffect(() => {
-    return () => {
-      stopCamera();
-      workerRef.current?.terminate();
-      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
-    };
+    return () => { stopCamera(); };
   }, [stopCamera]);
-
-  // captureRef: always points to the latest capture fn (avoids stale closure in timer)
-  const captureRef = useRef<() => void>(() => {});
-
-  // Start the silent scan loop when camera is ready
-  useEffect(() => {
-    if (scanState !== 'ready' || showManual) {
-      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
-      return;
-    }
-    scanTimerRef.current = setTimeout(() => captureRef.current(), 600);
-    return () => {
-      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
-    };
-  }, [scanState, showManual]);
 
   // ── Start camera ─────────────────────────────────────────────────────────
   const startCamera = useCallback(async () => {
@@ -226,16 +183,6 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
         });
       }
 
-      // Init Tesseract worker — PSM 7 = single text line (ideal for short codes)
-      if (!workerRef.current) {
-        const worker = await createWorker('eng', 1, {});
-        await worker.setParameters({
-          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ',
-          tessedit_pageseg_mode: PSM.SINGLE_LINE, // single text line
-        });
-        workerRef.current = worker;
-      }
-
       setScanState('ready');
     } catch (err) {
       console.error(err);
@@ -246,46 +193,49 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
     }
   }, []);
 
-  // ── Capture & OCR (runs silently in background) ─────────────────────────
+  // ── Capture & OCR — triggered only by user tap on “Capturar” ──────────────────
   const capture = useCallback(async () => {
-    if (!videoRef.current || !workerRef.current || isScanning.current) return;
+    if (!videoRef.current || isScanning.current) return;
     isScanning.current = true;
+    setScanState('scanning');
+    setErrorMsg('');
 
     try {
+      // Crop badge zone and encode as JPEG base64
       const canvas = preprocessCanvas(videoRef.current);
-      const worker = workerRef.current;
+      const base64 = canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
 
-      // Single pass — PSM 7 reads one line; whitelist limits noise
-      const { data } = await worker.recognize(canvas);
-      const raw = data.text ?? '';
-      let code = extractStickerCode(raw);
-      console.log('[OCR normal]', JSON.stringify(raw.trim()), '→', code);
+      const res = await fetch('/api/ocr', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ imageBase64: base64 }),
+      });
 
-      // Retry inverted (white-on-dark codes like some RSA/BRA labels)
-      if (code === null) {
-        const inv = invertCanvas(canvas);
-        const { data: data2 } = await worker.recognize(inv);
-        code = extractStickerCode(data2.text ?? '');
-        console.log('[OCR invertido]', JSON.stringify((data2.text ?? '').trim()), '→', code);
-      }
+      if (!res.ok) throw new Error(`OCR ${res.status}`);
+
+      const { text } = await res.json() as { text: string };
+      const code = extractStickerCode(text ?? '');
+      console.log('[Vision OCR]', JSON.stringify(text?.trim()), '→', code);
 
       if (code !== null) {
         const sticker = STICKER_CODE_MAP.get(code)!;
-        setResult({ sticker, alreadyOwned: owned.has(sticker.number), rawText: raw.trim() });
+        setResult({ sticker, alreadyOwned: owned.has(sticker.number), rawText: text.trim() });
         setScanState('result');
       } else {
-        scanTimerRef.current = setTimeout(() => captureRef.current(), 700);
+        setErrorMsg('Código não identificado. Ajuste a posição e tente novamente.');
+        setScanState('ready');
       }
     } catch (err) {
       console.error(err);
-      scanTimerRef.current = setTimeout(() => captureRef.current(), 1000);
+      setErrorMsg('Erro ao processar. Verifique a sua ligação.');
+      setScanState('ready');
     } finally {
       isScanning.current = false;
     }
-  }, [owned]);
-
-  // Keep captureRef in sync with the latest capture closure
-  useEffect(() => { captureRef.current = capture; }, [capture]);
+  }, [token, owned]);
 
   // ── Manual lookup ────────────────────────────────────────────────────────
   const handleManualSubmit = useCallback(() => {
@@ -329,7 +279,8 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
   // Whether the camera viewport should be visible
   const cameraActive =
     scanState === 'requesting-camera' ||
-    scanState === 'ready';
+    scanState === 'ready' ||
+    scanState === 'scanning';
 
   return (
     <div className="flex flex-col flex-1 min-h-0 relative bg-black">
@@ -411,13 +362,20 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
                     </span>
                   </div>
 
-                  {/* Scanning pulse at the bottom */}
-                  <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-copa-yellow">
-                    <span className="inline-block w-2 h-2 rounded-full bg-copa-yellow animate-pulse mr-1" />
-                    Escaneando…
+                  {/* Hint at the bottom */}
+                  <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-white/60">
+                    Toque em “Capturar” quando pronto
                   </span>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Scanning overlay — shown while Vision API is processing */}
+          {scanState === 'scanning' && (
+            <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-3 pointer-events-none">
+              <Loader2 size={44} className="animate-spin text-copa-green" />
+              <p className="text-white font-semibold text-sm">Identificando figurinha…</p>
             </div>
           )}
 
@@ -425,6 +383,10 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
 
         {/* Controls */}
         <div className="flex-shrink-0 bg-zinc-950 px-4 pt-4 pb-safe space-y-3">
+          {/* Error message from last scan attempt */}
+          {errorMsg && !showManual && (
+            <p className="text-red-400 text-xs text-center">{errorMsg}</p>
+          )}
           {/* Manual entry */}
           {showManual && (
             <div className="bg-zinc-900 rounded-xl p-3">
@@ -458,22 +420,28 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
           <div className="flex items-center gap-3">
             <button
               onClick={() => { stopCamera(); setScanState('idle'); }}
-              className="bg-zinc-800 text-zinc-300 rounded-xl p-3 active:scale-95 transition-transform"
+              disabled={scanState === 'scanning'}
+              className="bg-zinc-800 text-zinc-300 rounded-xl p-3 active:scale-95 transition-transform disabled:opacity-40"
             >
               <XCircle size={22} />
             </button>
 
             <button
               onClick={capture}
-              className="flex-1 py-4 rounded-2xl font-bold text-base transition-transform active:scale-95 flex items-center justify-center gap-2 bg-copa-green text-white"
+              disabled={scanState === 'scanning'}
+              className="flex-1 py-4 rounded-2xl font-bold text-base transition-transform active:scale-95 flex items-center justify-center gap-2 bg-copa-green text-white disabled:opacity-60 disabled:scale-100"
             >
-              <Camera size={20} />
-              Capturar
+              {scanState === 'scanning' ? (
+                <><Loader2 size={20} className="animate-spin" /> Processando…</>
+              ) : (
+                <><Camera size={20} /> Capturar</>
+              )}
             </button>
 
             <button
               onClick={() => setShowManual((v) => !v)}
-              className="bg-zinc-800 text-zinc-300 rounded-xl p-3 active:scale-95 transition-transform"
+              disabled={scanState === 'scanning'}
+              className="bg-zinc-800 text-zinc-300 rounded-xl p-3 active:scale-95 transition-transform disabled:opacity-40"
             >
               <Hash size={22} />
             </button>

@@ -5,6 +5,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { connectDB } from './db.js';
 import albumRouter from './routes/album.js';
+import ocrRouter from './routes/ocr.js';
 import { verifyToken } from './middleware/auth.js';
 
 dotenv.config();
@@ -25,6 +26,7 @@ if (!isProd) {
 
 // ── API routes ────────────────────────────────────────────────────────────────
 app.use('/api/album', verifyToken, albumRouter);
+app.use('/api/ocr', verifyToken, ocrRouter);
 
 // ── Serve built React app in production ──────────────────────────────────────
 if (isProd) {

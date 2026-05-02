@@ -155,11 +155,11 @@ export default function App() {
         )}
 
         {activeTab === 'verificar' && (
-          <CameraScanner mode="verificar" owned={owned} onAdd={addSticker} />
+          <CameraScanner mode="verificar" owned={owned} onAdd={addSticker} token={token} />
         )}
 
         {activeTab === 'adicionar' && (
-          <CameraScanner mode="adicionar" owned={owned} onAdd={addSticker} />
+          <CameraScanner mode="adicionar" owned={owned} onAdd={addSticker} token={token} />
         )}
       </main>
 
