@@ -6,7 +6,7 @@ const router = Router();
 /** Get or create album document for the authenticated user */
 async function getAlbum(userId) {
   const album = await Album.findOneAndUpdate(
-    { albumId: userId },
+    { userId: userId },
     { $setOnInsert: { ownedStickers: [] } },
     { new: true, upsert: true },
   );
@@ -31,7 +31,7 @@ router.post('/sticker', async (req, res) => {
   }
   try {
     const album = await Album.findOneAndUpdate(
-      { albumId: req.userId },
+      { userId: req.userId },
       { $addToSet: { ownedStickers: number } },
       { new: true, upsert: true },
     );
@@ -49,7 +49,7 @@ router.delete('/sticker/:number', async (req, res) => {
   }
   try {
     const album = await Album.findOneAndUpdate(
-      { albumId: req.userId },
+      { userId: req.userId },
       { $pull: { ownedStickers: number } },
       { new: true, upsert: true },
     );
@@ -70,7 +70,7 @@ router.post('/stickers/bulk', async (req, res) => {
   );
   try {
     const album = await Album.findOneAndUpdate(
-      { albumId: req.userId },
+      { userId: req.userId },
       { $addToSet: { ownedStickers: { $each: valid } } },
       { new: true, upsert: true },
     );

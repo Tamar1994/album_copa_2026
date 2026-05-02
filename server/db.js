@@ -13,4 +13,12 @@ export async function connectDB() {
 
   await mongoose.connect(uri, { dbName: 'album_copa_2026' });
   console.log('Connected to MongoDB');
+
+  // Drop legacy albumId index if it still exists (one-time migration)
+  try {
+    await mongoose.connection.collection('albums').dropIndex('albumId_1');
+    console.log('Dropped legacy albumId_1 index');
+  } catch {
+    // Index doesn't exist — nothing to do
+  }
 }
