@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 const albumSchema = new mongoose.Schema(
   {
-    userId: { type: String, required: true, unique: true },
+    albumId: { type: String, required: true, unique: true },
     ownedStickers: { type: [Number], default: [] },
   },
   { timestamps: true },
