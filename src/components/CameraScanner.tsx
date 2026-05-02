@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createWorker } from 'tesseract.js';
+import { createWorker, PSM } from 'tesseract.js';
 import { STICKER_CODE_MAP } from '../data/stickers';
 import type { Sticker } from '../types';
 import {
@@ -104,26 +104,26 @@ function ocrVariants(s: string): string[] {
 }
 
 /**
- * Extract a sticker code by cross-matching every letter group with every
- * digit group found in the text, with fuzzy OCR fixes on both sides.
- * E.g. text "RSA 1 MEX 5" → tries RSA×1, RSA×5, MEX×1, MEX×5.
+ * Extract a sticker code from a single OCR text string.
+ * Handles: "RSA 1", "RSA1", "MEX 5", "CC2", "00"
+ * Applies fuzzy fixes (0↔O, 1↔I/L, 5↔S, 8↔B, 6↔G) on each token.
  */
-function extractStickerCode(lettersText: string, digitsText: string): string | null {
+function extractStickerCode(text: string): string | null {
+  const upper = text.toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
   // Special case: bare "00"
-  if (/\b00\b/.test(digitsText) && STICKER_CODE_MAP.has('00')) return '00';
+  if (/\b00\b/.test(upper) && STICKER_CODE_MAP.has('00')) return '00';
 
-  const letterGroups = [...lettersText.toUpperCase().matchAll(/[A-Z]{2,3}/g)].map((m) => m[0]);
-  const digitGroups  = [...digitsText.matchAll(/\d{1,2}/g)].map((m) => m[0]);
-
-  for (const raw3 of letterGroups) {
-    for (const lv of ocrVariants(raw3)) {
-      for (const rawD of digitGroups) {
-        for (const dv of ocrVariants(rawD)) {
-          const withSpace = `${lv} ${dv}`;
-          const noSpace   = `${lv}${dv}`;
-          if (STICKER_CODE_MAP.has(withSpace)) return withSpace;
-          if (STICKER_CODE_MAP.has(noSpace))   return noSpace;
-        }
+  // Match letter group (2-3 chars) + optional space + digit group (1-2 chars)
+  const re = /\b([A-Z0-9]{2,3})\s*([0-9]{1,2})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(upper)) !== null) {
+    for (const lv of ocrVariants(m[1])) {
+      for (const dv of ocrVariants(m[2])) {
+        const withSpace = `${lv} ${dv}`;
+        const noSpace   = `${lv}${dv}`;
+        if (STICKER_CODE_MAP.has(withSpace)) return withSpace;
+        if (STICKER_CODE_MAP.has(noSpace))   return noSpace;
       }
     }
   }
@@ -204,12 +204,12 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
         });
       }
 
-      // Init Tesseract worker
+      // Init Tesseract worker — PSM 7 = single text line (ideal for short codes)
       if (!workerRef.current) {
         const worker = await createWorker('eng', 1, {});
-        // Default whitelist — will be overridden per-pass during scan
         await worker.setParameters({
           tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ',
+          tessedit_pageseg_mode: PSM.SINGLE_LINE, // single text line
         });
         workerRef.current = worker;
       }
@@ -233,38 +233,25 @@ export function CameraScanner({ mode, owned, onAdd }: Props) {
       const canvas = preprocessCanvas(videoRef.current);
       const worker = workerRef.current;
 
-      // Pass 1: letters only
-      await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' });
-      const { data: dataL } = await worker.recognize(canvas);
+      // Single pass — PSM 7 reads one line; whitelist limits noise
+      const { data } = await worker.recognize(canvas);
+      const raw = data.text ?? '';
+      let code = extractStickerCode(raw);
+      console.log('[OCR normal]', JSON.stringify(raw.trim()), '→', code);
 
-      // Pass 2: digits only
-      await worker.setParameters({ tessedit_char_whitelist: '0123456789' });
-      const { data: dataD } = await worker.recognize(canvas);
-
-      // Restore combined whitelist
-      await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' });
-
-      let code = extractStickerCode(dataL.text ?? '', dataD.text ?? '');
-      console.log('[OCR normal] letras:', JSON.stringify(dataL.text?.trim()), '| dígitos:', JSON.stringify(dataD.text?.trim()), '| código:', code);
-
-      // Retry with inverted image (white-on-dark codes)
+      // Retry inverted (white-on-dark codes like some RSA/BRA labels)
       if (code === null) {
         const inv = invertCanvas(canvas);
-        await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' });
-        const { data: dataL2 } = await worker.recognize(inv);
-        await worker.setParameters({ tessedit_char_whitelist: '0123456789' });
-        const { data: dataD2 } = await worker.recognize(inv);
-        await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' });
-        code = extractStickerCode(dataL2.text ?? '', dataD2.text ?? '');
-        console.log('[OCR invertido] letras:', JSON.stringify(dataL2.text?.trim()), '| dígitos:', JSON.stringify(dataD2.text?.trim()), '| código:', code);
+        const { data: data2 } = await worker.recognize(inv);
+        code = extractStickerCode(data2.text ?? '');
+        console.log('[OCR invertido]', JSON.stringify((data2.text ?? '').trim()), '→', code);
       }
 
       if (code !== null) {
         const sticker = STICKER_CODE_MAP.get(code)!;
-        setResult({ sticker, alreadyOwned: owned.has(sticker.number), rawText: `${dataL.text?.trim()} ${dataD.text?.trim()}` });
+        setResult({ sticker, alreadyOwned: owned.has(sticker.number), rawText: raw.trim() });
         setScanState('result');
       } else {
-        // Schedule next silent scan
         scanTimerRef.current = setTimeout(() => captureRef.current(), 700);
       }
     } catch (err) {
