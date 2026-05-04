@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { STICKER_CODE_MAP, TEAM_NAME_MAP } from '../data/stickers';
+import { STICKER_CODE_MAP } from '../data/stickers';
 import type { Sticker } from '../types';
 import {
   Camera,
@@ -34,20 +34,7 @@ interface ScanResult {
   rawText: string;
 }
 
-interface PageAlbumResult {
-  /** Abbreviation of the detected team (e.g. "IRQ") */
-  teamAbbrev: string;
-  /** 1 = stickers 1-10, 2 = stickers 11-20 */
-  page: 1 | 2;
-  /** ALL sticker objects in the page range (1-10 or 11-20) */
-  allStickers: Sticker[];
-  /**
-   * Numbers the OCR CONFIRMED as empty (slot code was visible in photo).
-   * These are definitely NOT glued → pre-UNchecked.
-   * Everything else is uncertain → pre-CHECKED (user can untick).
-   */
-  confirmedEmptyNums: Set<number>;
-}
+type MultiResult = { code: string; sticker: Sticker; alreadyOwned: boolean };
 
 // ─── Image preprocessing helpers ─────────────────────────────────────────────
 /**
@@ -149,7 +136,33 @@ function extractStickerCode(text: string): string | null {
 }
 
 /**
- * Capture full frame (with small margin) for page scanning.
+ * Extract ALL valid sticker codes from text (multi-sticker mode).
+ */
+function extractAllStickerCodes(text: string): string[] {
+  const upper = text.toUpperCase().replace(/[^A-Z0-9 \n]/g, ' ').replace(/\s+/g, ' ');
+  const found = new Set<string>();
+
+  if (/\b00\b/.test(upper) && STICKER_CODE_MAP.has('00')) found.add('00');
+
+  const re = /\b([A-Z0-9]{2,3})\s*([0-9]{1,2})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(upper)) !== null) {
+    let added = false;
+    for (const lv of ocrVariants(m[1])) {
+      if (added) break;
+      for (const dv of ocrVariants(m[2])) {
+        const withSpace = `${lv} ${dv}`;
+        const noSpace   = `${lv}${dv}`;
+        if (STICKER_CODE_MAP.has(withSpace)) { found.add(withSpace); added = true; break; }
+        if (STICKER_CODE_MAP.has(noSpace))   { found.add(noSpace);   added = true; break; }
+      }
+    }
+  }
+  return [...found];
+}
+
+/**
+ * Capture full frame (with small margin) for multi-sticker scanning.
  * Scaled to 1280 px wide — wide enough to read many sticker badges at once.
  */
 function preprocessPageCanvas(src: HTMLVideoElement): HTMLCanvasElement {
@@ -174,81 +187,6 @@ function preprocessPageCanvas(src: HTMLVideoElement): HTMLCanvasElement {
   return canvas;
 }
 
-// ─── Album page analysis ─────────────────────────────────────────────────────
-interface AlbumPageInfo {
-  teamAbbrev: string | null;
-  page: 1 | 2 | null;
-  /** Slot numbers visible in OCR = empty (sticker not yet glued = missing) */
-  emptySlotNums: number[];
-}
-
-/**
- * Analyse DOCUMENT_TEXT_DETECTION output from an album team page.
- *
- * Logic:
- *  - Empty slots show their code in the album (e.g. "MEX\n3") → visible in OCR
- *  - Glued stickers hide the slot code under the player photo → NOT in OCR
- *  - Page 1 (stickers 1-10): has "WE ARE" printed + country flag
- *  - Page 2 (stickers 11-20): has "GROUP X" printed
- */
-function extractAlbumPageInfo(text: string): AlbumPageInfo {
-  const upper = text
-    .toUpperCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^A-Z0-9 \n]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // 1. Collect visible sticker codes (= empty slots, sticker not glued yet)
-  const teamSlots = new Map<string, Set<number>>();
-  const re = /\b([A-Z]{2,3})\s+([0-9]{1,2})\b/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(upper)) !== null) {
-    const num = parseInt(m[2]);
-    if (num < 1 || num > 20) continue;
-    const candidates = [m[1], ...ocrVariants(m[1])];
-    for (const lv of candidates) {
-      if (STICKER_CODE_MAP.has(`${lv} ${num}`)) {
-        const s = teamSlots.get(lv) ?? new Set<number>();
-        s.add(num);
-        teamSlots.set(lv, s);
-        break;
-      }
-    }
-  }
-
-  // Dominant team = one with most visible empty slots
-  let teamAbbrev: string | null = null;
-  let maxCount = 0;
-  for (const [abbrev, slots] of teamSlots) {
-    if (slots.size > maxCount) { maxCount = slots.size; teamAbbrev = abbrev; }
-  }
-  const emptySlotNums = teamAbbrev
-    ? [...(teamSlots.get(teamAbbrev) ?? new Set<number>())].sort((a, b) => a - b)
-    : [];
-
-  // 2. Determine page from slot numbers, then from text clues
-  let page: 1 | 2 | null = null;
-  if (emptySlotNums.length > 0) {
-    const avg = emptySlotNums.reduce((a, b) => a + b, 0) / emptySlotNums.length;
-    page = avg <= 10 ? 1 : 2;
-  } else if (/WE\s*ARE/.test(upper)) {
-    page = 1;
-  } else if (/GROUP\s*[A-L]/.test(upper)) {
-    page = 2;
-  }
-
-  // 3. If no team from slot codes, try country name in text
-  if (!teamAbbrev) {
-    for (const [name, abbrev] of TEAM_NAME_MAP) {
-      if (upper.includes(name)) { teamAbbrev = abbrev; break; }
-    }
-  }
-
-  return { teamAbbrev, page, emptySlotNums };
-}
-
 // ─── Component ───────────────────────────────────────────────────────────────
 export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -258,10 +196,8 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
   const [scanState, setScanState] = useState<ScanState>('idle');
   const [scanMode, setScanMode] = useState<'single' | 'page'>('single');
   const [result, setResult] = useState<ScanResult | null>(null);
-  const [pageAlbumResult, setPageAlbumResult] = useState<PageAlbumResult | null>(null);
-  const [pageAddedNums, setPageAddedNums] = useState<Set<number>>(new Set());
-  // Numbers the user has checked to add (pre-filled from OCR inference)
-  const [pageChecked, setPageChecked] = useState<Set<number>>(new Set());
+  const [multiFound, setMultiFound] = useState<MultiResult[]>([]);
+  const [multiAddedNums, setMultiAddedNums] = useState<Set<number>>(new Set());
   const [errorMsg, setErrorMsg] = useState('');
   const [manualCode, setManualCode] = useState('');
   const [showManual, setShowManual] = useState(false);
@@ -377,7 +313,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
     setScanState('result');
   }, [manualCode, owned]);
 
-  // ── Page scan OCR (album page — infer owned from GLUED slots) ───────────────
+  // ── Multi-sticker OCR (figurinhas na mesa/mão) ────────────────────────────
   const capturePageOCR = useCallback(async () => {
     if (!videoRef.current || isScanning.current) return;
     isScanning.current = true;
@@ -400,45 +336,17 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
       if (!res.ok) throw new Error(`OCR ${res.status}`);
 
       const { text } = await res.json() as { text: string };
-      console.log('[Vision OCR-page]', JSON.stringify(text?.slice(0, 300)));
+      const codes = extractAllStickerCodes(text ?? '');
+      console.log('[Vision OCR-multi]', codes);
 
-      const info = extractAlbumPageInfo(text ?? '');
-      console.log('[Album page info]', info);
-
-      if (info.teamAbbrev && info.page) {
-        const start = info.page === 1 ? 1 : 11;
-        const end   = info.page === 1 ? 10 : 20;
-
-        const allStickers: Sticker[] = [];
-        for (let n = start; n <= end; n++) {
-          const sticker = STICKER_CODE_MAP.get(`${info.teamAbbrev} ${n}`);
-          if (sticker) allStickers.push(sticker);
-        }
-
-        setPageAlbumResult({
-          teamAbbrev: info.teamAbbrev,
-          page: info.page,
-          allStickers,
-          confirmedEmptyNums: new Set(info.emptySlotNums),
-        });
-        // Pre-check all slots NOT confirmed empty by OCR
-        // emptySlotNums contains page-relative numbers (1-10 or 11-20)
-        // sticker.code = "IRQ 3" → slot number = 3
-        setPageChecked(new Set(
-          allStickers
-            .filter((s) => {
-              const slotNum = parseInt(s.code.split(' ')[1]);
-              return !info.emptySlotNums.includes(slotNum);
-            })
-            .map((s) => s.number),
-        ));
+      if (codes.length > 0) {
+        setMultiFound(codes.map((code) => {
+          const sticker = STICKER_CODE_MAP.get(code)!;
+          return { code, sticker, alreadyOwned: owned.has(sticker.number) };
+        }));
         setScanState('result');
       } else {
-        setErrorMsg(
-          info.teamAbbrev
-            ? 'Não foi possível identificar se é página 1 ou 2. Certifique-se que "WE ARE" ou "GROUP X" esteja visível.'
-            : 'Time não identificado. Garanta que o nome do país ou os códigos das figurinhas estejam visíveis.',
-        );
+        setErrorMsg('Nenhum código identificado. Certifique-se que os códigos das figurinhas estão visíveis.');
         setScanState('ready');
       }
     } catch (err) {
@@ -448,7 +356,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
     } finally {
       isScanning.current = false;
     }
-  }, [token]);
+  }, [token, owned]);
 
   // ── Action (add) ─────────────────────────────────────────────────────────
   const handleAddSticker = useCallback(() => {
@@ -459,9 +367,8 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
 
   const reset = useCallback(() => {
     setResult(null);
-    setPageAlbumResult(null);
-    setPageAddedNums(new Set());
-    setPageChecked(new Set());
+    setMultiFound([]);
+    setMultiAddedNums(new Set());
     setShowManual(false);
     setManualCode('');
     setErrorMsg('');
@@ -565,7 +472,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="w-[92%] h-[92%] border-2 border-copa-yellow rounded-lg relative">
                     <span className="absolute -top-5 left-0 right-0 text-center text-[10px] text-copa-yellow font-semibold">
-                      Aponte para a página do álbum (com figurinhas coladas)
+                      Aponte para as figurinhas (mesa ou mão)
                     </span>
                     <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-white/60">
                       Toque em “Capturar” quando pronto
@@ -581,7 +488,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
             <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-3 pointer-events-none">
               <Loader2 size={44} className="animate-spin text-copa-green" />
               <p className="text-white font-semibold text-sm">
-                {scanMode === 'page' ? 'Identificando figurinhas na página…' : 'Identificando figurinha…'}
+                {scanMode === 'page' ? 'Identificando figurinhas…' : 'Identificando figurinha…'}
               </p>
             </div>
           )}
@@ -602,7 +509,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
               onClick={() => setScanMode('page')}
               className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors ${scanMode === 'page' ? 'bg-copa-green text-white' : 'text-zinc-400'}`}
             >
-              Álbum (página)
+              Várias
             </button>
           </div>
           {/* Error message from last scan attempt */}
@@ -765,111 +672,63 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
         </div>
       )}
 
-      {/* ── Page result ── */}
-      {scanState === 'result' && scanMode === 'page' && pageAlbumResult && (() => {
-        const teamSticker = pageAlbumResult.allStickers[0];
-        // stickers checked by user that haven't been added yet
-        const toAddStickers = pageAlbumResult.allStickers.filter(
-          (s) => pageChecked.has(s.number) && !owned.has(s.number) && !pageAddedNums.has(s.number),
+      {/* ── Multi-sticker result ── */}
+      {scanState === 'result' && scanMode === 'page' && multiFound.length > 0 && (() => {
+        const newOnes = multiFound.filter(
+          (f) => !f.alreadyOwned && !multiAddedNums.has(f.sticker.number),
         );
-        const alreadyAdded = (n: number) => owned.has(n) || pageAddedNums.has(n);
-
         return (
           <div className="flex flex-col flex-1 min-h-0">
             {/* Header */}
-            <div className="flex-shrink-0 px-4 pt-4 pb-3 bg-zinc-950 border-b border-zinc-800">
-              {teamSticker?.team && (
-                <p className="text-white font-bold text-base">
-                  {teamSticker.team}
-                  {teamSticker.teamPt && teamSticker.teamPt !== teamSticker.team && (
-                    <span className="text-zinc-400 font-normal text-sm"> ({teamSticker.teamPt})</span>
-                  )}
-                </p>
-              )}
-              <p className="text-zinc-400 text-xs mt-0.5">
-                Página {pageAlbumResult.page} · figurinhas {pageAlbumResult.page === 1 ? '1–10' : '11–20'}
+            <div className="flex-shrink-0 px-4 pt-4 pb-2 bg-zinc-950 border-b border-zinc-800">
+              <p className="text-white font-bold text-base">
+                {multiFound.length} figurinha{multiFound.length !== 1 ? 's' : ''} encontrada{multiFound.length !== 1 ? 's' : ''}
               </p>
-              <p className="text-zinc-400 text-xs">
-                Marque as que estão <span className="text-copa-yellow font-semibold">coladas</span> no álbum
+              <p className="text-zinc-400 text-xs mt-0.5">
+                {newOnes.length} nova{newOnes.length !== 1 ? 's' : ''} ·{' '}
+                {multiFound.length - newOnes.length} já registada{multiFound.length - newOnes.length !== 1 ? 's' : ''}
               </p>
             </div>
 
-            {/* Checklist */}
-            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
-              {pageAlbumResult.allStickers.map((sticker) => {
-                const isConfirmedEmpty = pageAlbumResult.confirmedEmptyNums.has(
-                  parseInt(sticker.code.split(' ')[1]),
-                );
-                const isChecked = pageChecked.has(sticker.number);
-                const isDone = alreadyAdded(sticker.number);
-
+            {/* List */}
+            <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+              {multiFound.map(({ code, sticker, alreadyOwned }) => {
+                const isNew = !alreadyOwned && !multiAddedNums.has(sticker.number);
                 return (
-                  <button
-                    key={sticker.number}
-                    disabled={isDone}
-                    onClick={() => {
-                      if (isDone) return;
-                      setPageChecked((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(sticker.number)) next.delete(sticker.number);
-                        else next.add(sticker.number);
-                        return next;
-                      });
-                    }}
-                    className={`w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors ${
-                      isDone
-                        ? 'bg-zinc-800/40 opacity-50 cursor-default'
-                        : isChecked
-                        ? 'bg-copa-green/15 border border-copa-green/40'
-                        : isConfirmedEmpty
-                        ? 'bg-zinc-900/50 border border-zinc-800'
-                        : 'bg-zinc-800/60 border border-zinc-700'
-                    }`}
+                  <div
+                    key={code}
+                    className={`flex items-center gap-3 rounded-xl px-3 py-2 ${isNew ? 'bg-copa-green/10 border border-copa-green/30' : 'bg-zinc-800/60'}`}
                   >
-                    {/* Checkbox */}
-                    <span className={`w-5 h-5 rounded flex items-center justify-center flex-shrink-0 text-xs font-bold border ${
-                      isDone
-                        ? 'bg-zinc-600 border-zinc-600 text-white'
-                        : isChecked
-                        ? 'bg-copa-green border-copa-green text-white'
-                        : 'border-zinc-600 text-transparent'
-                    }`}>
-                      ✓
+                    <span className={`text-lg ${isNew ? 'text-copa-green' : 'text-zinc-500'}`}>
+                      {isNew ? '＋' : '✓'}
                     </span>
-
                     <div className="flex-1 min-w-0">
-                      <p className={`text-sm font-semibold truncate ${isChecked && !isDone ? 'text-white' : 'text-zinc-400'}`}>
-                        {sticker.label}
+                      <p className="text-white text-sm font-semibold truncate">
+                        {sticker.team ?? sticker.label}
                       </p>
-                      <p className="text-zinc-500 text-xs flex items-center gap-1">
-                        {sticker.code}
-                        {isConfirmedEmpty && (
-                          <span className="text-zinc-600 text-[10px]">· slot vazio (OCR)</span>
-                        )}
-                      </p>
+                      <p className="text-zinc-400 text-xs">{sticker.label !== (sticker.team ?? '') ? sticker.label + ' · ' : ''}{sticker.code}</p>
                     </div>
-
-                    <span className="text-xs text-zinc-600 flex-shrink-0">#{sticker.number}</span>
-                  </button>
+                    <span className="text-xs text-zinc-500 flex-shrink-0">#{sticker.number}</span>
+                  </div>
                 );
               })}
             </div>
 
-            {/* Action buttons */}
+            {/* Actions */}
             <div className="flex-shrink-0 bg-zinc-950 px-4 py-4 space-y-2 border-t border-zinc-800">
               {mode === 'adicionar' && (
                 <button
-                  disabled={toAddStickers.length === 0}
+                  disabled={newOnes.length === 0}
                   onClick={() => {
-                    const nums = toAddStickers.map((s) => s.number);
+                    const nums = newOnes.map((f) => f.sticker.number);
                     onAddMany?.(nums);
-                    setPageAddedNums((prev) => new Set([...prev, ...nums]));
+                    setMultiAddedNums((prev) => new Set([...prev, ...nums]));
                   }}
                   className="w-full bg-copa-green text-white font-bold py-4 rounded-2xl text-base active:scale-95 transition-transform disabled:opacity-40 disabled:scale-100"
                 >
-                  {toAddStickers.length > 0
-                    ? `Adicionar ${toAddStickers.length} figurinha${toAddStickers.length !== 1 ? 's' : ''} marcadas`
-                    : 'Nenhuma nova para adicionar'}
+                  {newOnes.length > 0
+                    ? `Adicionar ${newOnes.length} figurinha${newOnes.length !== 1 ? 's' : ''}`
+                    : 'Todas já registadas'}
                 </button>
               )}
               <div className="flex gap-3">
@@ -880,7 +739,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
                   <RefreshCw size={18} /> Nova Leitura
                 </button>
                 <button
-                  onClick={() => { stopCamera(); setScanState('idle'); setPageAlbumResult(null); setPageAddedNums(new Set()); setPageChecked(new Set()); }}
+                  onClick={() => { stopCamera(); setScanState('idle'); setMultiFound([]); setMultiAddedNums(new Set()); }}
                   className="flex-1 bg-zinc-800 text-zinc-300 font-semibold py-3 rounded-xl active:scale-95 transition-transform"
                 >
                   Fechar
