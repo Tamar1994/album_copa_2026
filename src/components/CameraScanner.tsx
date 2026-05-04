@@ -35,14 +35,18 @@ interface ScanResult {
 }
 
 interface PageAlbumResult {
-  /** Abbreviation of the detected team (e.g. "MEX") */
+  /** Abbreviation of the detected team (e.g. "IRQ") */
   teamAbbrev: string;
-  /** 1 = stickers 1-10 ("WE ARE" page), 2 = stickers 11-20 ("GROUP X" page) */
+  /** 1 = stickers 1-10, 2 = stickers 11-20 */
   page: 1 | 2;
-  /** Sticker objects for glued slots (not visible in OCR = owned) */
-  ownedStickers: Sticker[];
-  /** Sticker objects for empty slots (visible in OCR = still missing) */
-  emptyStickers: Sticker[];
+  /** ALL sticker objects in the page range (1-10 or 11-20) */
+  allStickers: Sticker[];
+  /**
+   * Numbers the OCR CONFIRMED as empty (slot code was visible in photo).
+   * These are definitely NOT glued → pre-UNchecked.
+   * Everything else is uncertain → pre-CHECKED (user can untick).
+   */
+  confirmedEmptyNums: Set<number>;
 }
 
 // ─── Image preprocessing helpers ─────────────────────────────────────────────
@@ -256,6 +260,8 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
   const [result, setResult] = useState<ScanResult | null>(null);
   const [pageAlbumResult, setPageAlbumResult] = useState<PageAlbumResult | null>(null);
   const [pageAddedNums, setPageAddedNums] = useState<Set<number>>(new Set());
+  // Numbers the user has checked to add (pre-filled from OCR inference)
+  const [pageChecked, setPageChecked] = useState<Set<number>>(new Set());
   const [errorMsg, setErrorMsg] = useState('');
   const [manualCode, setManualCode] = useState('');
   const [showManual, setShowManual] = useState(false);
@@ -403,22 +409,29 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
         const start = info.page === 1 ? 1 : 11;
         const end   = info.page === 1 ? 10 : 20;
 
-        const ownedStickers: Sticker[] = [];
-        const emptyStickers: Sticker[] = [];
-
+        const allStickers: Sticker[] = [];
         for (let n = start; n <= end; n++) {
           const sticker = STICKER_CODE_MAP.get(`${info.teamAbbrev} ${n}`);
-          if (!sticker) continue;
-          // Visible in OCR = empty slot (sticker not glued) = MISSING
-          // Not in OCR   = covered by player photo = OWNED (glued)
-          if (info.emptySlotNums.includes(n)) {
-            emptyStickers.push(sticker);
-          } else {
-            ownedStickers.push(sticker);
-          }
+          if (sticker) allStickers.push(sticker);
         }
 
-        setPageAlbumResult({ teamAbbrev: info.teamAbbrev, page: info.page, ownedStickers, emptyStickers });
+        setPageAlbumResult({
+          teamAbbrev: info.teamAbbrev,
+          page: info.page,
+          allStickers,
+          confirmedEmptyNums: new Set(info.emptySlotNums),
+        });
+        // Pre-check all slots NOT confirmed empty by OCR
+        // emptySlotNums contains page-relative numbers (1-10 or 11-20)
+        // sticker.code = "IRQ 3" → slot number = 3
+        setPageChecked(new Set(
+          allStickers
+            .filter((s) => {
+              const slotNum = parseInt(s.code.split(' ')[1]);
+              return !info.emptySlotNums.includes(slotNum);
+            })
+            .map((s) => s.number),
+        ));
         setScanState('result');
       } else {
         setErrorMsg(
@@ -448,6 +461,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
     setResult(null);
     setPageAlbumResult(null);
     setPageAddedNums(new Set());
+    setPageChecked(new Set());
     setShowManual(false);
     setManualCode('');
     setErrorMsg('');
@@ -753,10 +767,13 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
 
       {/* ── Page result ── */}
       {scanState === 'result' && scanMode === 'page' && pageAlbumResult && (() => {
-        const teamSticker = pageAlbumResult.ownedStickers[0] ?? pageAlbumResult.emptyStickers[0];
-        const newStickers = pageAlbumResult.ownedStickers.filter(
-          (s) => !owned.has(s.number) && !pageAddedNums.has(s.number),
+        const teamSticker = pageAlbumResult.allStickers[0];
+        // stickers checked by user that haven't been added yet
+        const toAddStickers = pageAlbumResult.allStickers.filter(
+          (s) => pageChecked.has(s.number) && !owned.has(s.number) && !pageAddedNums.has(s.number),
         );
+        const alreadyAdded = (n: number) => owned.has(n) || pageAddedNums.has(n);
+
         return (
           <div className="flex flex-col flex-1 min-h-0">
             {/* Header */}
@@ -773,74 +790,86 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
                 Página {pageAlbumResult.page} · figurinhas {pageAlbumResult.page === 1 ? '1–10' : '11–20'}
               </p>
               <p className="text-zinc-400 text-xs">
-                {pageAlbumResult.ownedStickers.length} coladas ·{' '}
-                {pageAlbumResult.emptyStickers.length} slot{pageAlbumResult.emptyStickers.length !== 1 ? 's' : ''} vazio{pageAlbumResult.emptyStickers.length !== 1 ? 's' : ''}
+                Marque as que estão <span className="text-copa-yellow font-semibold">coladas</span> no álbum
               </p>
             </div>
 
-            {/* Scrollable list */}
+            {/* Checklist */}
             <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
-              {pageAlbumResult.ownedStickers.length > 0 && (
-                <>
-                  <p className="text-[10px] text-zinc-500 uppercase font-bold pt-2 pb-1 tracking-wide">
-                    Coladas — na sua coleção
-                  </p>
-                  {pageAlbumResult.ownedStickers.map((sticker) => {
-                    const isNew = !owned.has(sticker.number) && !pageAddedNums.has(sticker.number);
-                    return (
-                      <div
-                        key={sticker.number}
-                        className={`flex items-center gap-3 rounded-xl px-3 py-2 ${
-                          isNew ? 'bg-copa-green/10 border border-copa-green/30' : 'bg-zinc-800/60'
-                        }`}
-                      >
-                        <span className={`text-base ${isNew ? 'text-copa-green' : 'text-zinc-500'}`}>
-                          {isNew ? '＋' : '✓'}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-white text-sm font-semibold truncate">{sticker.label}</p>
-                          <p className="text-zinc-400 text-xs">{sticker.code}</p>
-                        </div>
-                        <span className="text-xs text-zinc-500 flex-shrink-0">#{sticker.number}</span>
-                      </div>
-                    );
-                  })}
-                </>
-              )}
-              {pageAlbumResult.emptyStickers.length > 0 && (
-                <>
-                  <p className="text-[10px] text-zinc-500 uppercase font-bold pt-3 pb-1 tracking-wide">
-                    Slots vazios — ainda falta colar
-                  </p>
-                  {pageAlbumResult.emptyStickers.map((sticker) => (
-                    <div
-                      key={sticker.number}
-                      className="flex items-center gap-3 rounded-xl px-3 py-2 bg-zinc-900/40 opacity-60"
-                    >
-                      <span className="text-base text-zinc-600">✗</span>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-zinc-400 text-sm truncate">{sticker.label}</p>
-                        <p className="text-zinc-600 text-xs">{sticker.code}</p>
-                      </div>
-                      <span className="text-xs text-zinc-600 flex-shrink-0">#{sticker.number}</span>
+              {pageAlbumResult.allStickers.map((sticker) => {
+                const isConfirmedEmpty = pageAlbumResult.confirmedEmptyNums.has(
+                  parseInt(sticker.code.split(' ')[1]),
+                );
+                const isChecked = pageChecked.has(sticker.number);
+                const isDone = alreadyAdded(sticker.number);
+
+                return (
+                  <button
+                    key={sticker.number}
+                    disabled={isDone}
+                    onClick={() => {
+                      if (isDone) return;
+                      setPageChecked((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(sticker.number)) next.delete(sticker.number);
+                        else next.add(sticker.number);
+                        return next;
+                      });
+                    }}
+                    className={`w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors ${
+                      isDone
+                        ? 'bg-zinc-800/40 opacity-50 cursor-default'
+                        : isChecked
+                        ? 'bg-copa-green/15 border border-copa-green/40'
+                        : isConfirmedEmpty
+                        ? 'bg-zinc-900/50 border border-zinc-800'
+                        : 'bg-zinc-800/60 border border-zinc-700'
+                    }`}
+                  >
+                    {/* Checkbox */}
+                    <span className={`w-5 h-5 rounded flex items-center justify-center flex-shrink-0 text-xs font-bold border ${
+                      isDone
+                        ? 'bg-zinc-600 border-zinc-600 text-white'
+                        : isChecked
+                        ? 'bg-copa-green border-copa-green text-white'
+                        : 'border-zinc-600 text-transparent'
+                    }`}>
+                      ✓
+                    </span>
+
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-semibold truncate ${isChecked && !isDone ? 'text-white' : 'text-zinc-400'}`}>
+                        {sticker.label}
+                      </p>
+                      <p className="text-zinc-500 text-xs flex items-center gap-1">
+                        {sticker.code}
+                        {isConfirmedEmpty && (
+                          <span className="text-zinc-600 text-[10px]">· slot vazio (OCR)</span>
+                        )}
+                      </p>
                     </div>
-                  ))}
-                </>
-              )}
+
+                    <span className="text-xs text-zinc-600 flex-shrink-0">#{sticker.number}</span>
+                  </button>
+                );
+              })}
             </div>
 
             {/* Action buttons */}
             <div className="flex-shrink-0 bg-zinc-950 px-4 py-4 space-y-2 border-t border-zinc-800">
-              {mode === 'adicionar' && newStickers.length > 0 && (
+              {mode === 'adicionar' && (
                 <button
+                  disabled={toAddStickers.length === 0}
                   onClick={() => {
-                    const nums = newStickers.map((s) => s.number);
+                    const nums = toAddStickers.map((s) => s.number);
                     onAddMany?.(nums);
                     setPageAddedNums((prev) => new Set([...prev, ...nums]));
                   }}
-                  className="w-full bg-copa-green text-white font-bold py-4 rounded-2xl text-base active:scale-95 transition-transform"
+                  className="w-full bg-copa-green text-white font-bold py-4 rounded-2xl text-base active:scale-95 transition-transform disabled:opacity-40 disabled:scale-100"
                 >
-                  Adicionar {newStickers.length} figurinha{newStickers.length !== 1 ? 's' : ''} coladas
+                  {toAddStickers.length > 0
+                    ? `Adicionar ${toAddStickers.length} figurinha${toAddStickers.length !== 1 ? 's' : ''} marcadas`
+                    : 'Nenhuma nova para adicionar'}
                 </button>
               )}
               <div className="flex gap-3">
@@ -851,7 +880,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
                   <RefreshCw size={18} /> Nova Leitura
                 </button>
                 <button
-                  onClick={() => { stopCamera(); setScanState('idle'); setPageAlbumResult(null); setPageAddedNums(new Set()); }}
+                  onClick={() => { stopCamera(); setScanState('idle'); setPageAlbumResult(null); setPageAddedNums(new Set()); setPageChecked(new Set()); }}
                   className="flex-1 bg-zinc-800 text-zinc-300 font-semibold py-3 rounded-xl active:scale-95 transition-transform"
                 >
                   Fechar
