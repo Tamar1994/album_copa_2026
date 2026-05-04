@@ -584,13 +584,17 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
           {/* Status icon */}
           {isVerify ? (
             result.alreadyOwned ? (
-              <CheckCircle2 size={72} className="text-copa-green" />
+              /* Já tenho → vermelho (não preciso, não vale a pena pegar) */
+              <XCircle size={72} className="text-red-500" />
             ) : (
-              <XCircle size={72} className="text-zinc-500" />
+              /* Não tenho → verde (quero pegar!) */
+              <CheckCircle2 size={72} className="text-copa-green" />
             )
           ) : result.alreadyOwned ? (
-            <CheckCircle2 size={72} className="text-copa-yellow" />
+            /* Adicionar mas já tenho → vermelho */
+            <XCircle size={72} className="text-red-500" />
           ) : (
+            /* Adicionar e é nova → verde */
             <CheckCircle2 size={72} className="text-copa-green" />
           )}
 
@@ -623,23 +627,23 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
 
           {/* Status message */}
           <div
-            className={`w-full text-center py-3 rounded-xl font-semibold text-sm ${
+            className={`w-full text-center py-3 px-4 rounded-xl font-semibold text-sm ${
               isVerify
                 ? result.alreadyOwned
-                  ? 'bg-copa-green/20 text-copa-green border border-copa-green/40'
-                  : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
+                  ? 'bg-red-500/15 text-red-400 border border-red-500/30'
+                  : 'bg-copa-green/20 text-copa-green border border-copa-green/40'
                 : result.alreadyOwned
-                ? 'bg-copa-yellow/20 text-copa-yellow border border-copa-yellow/40'
+                ? 'bg-red-500/15 text-red-400 border border-red-500/30'
                 : 'bg-copa-green/20 text-copa-green border border-copa-green/40'
             }`}
           >
             {isVerify
               ? result.alreadyOwned
-                ? '✓ Você já possui esta figurinha (pode trocar!)'
-                : '✗ Você não possui esta figurinha'
+                ? '✗ Você já tem esta — não precisa pegar'
+                : '✓ Você não tem esta — vale a pena pegar!'
               : result.alreadyOwned
-              ? '⚠ Você já tem esta figurinha cadastrada'
-              : '✓ Figurinha adicionada à sua coleção!'}
+              ? '✗ Você já possui esta figurinha. Tente trocá-la por uma que ainda não tem!'
+              : '✓ Figurinha nova! Confirme para adicionar à sua coleção.'}
           </div>
 
           {/* Action buttons */}
