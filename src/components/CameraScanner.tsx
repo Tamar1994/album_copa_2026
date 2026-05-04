@@ -145,7 +145,6 @@ function extractStickerCode(text: string): string | null {
 }
 
 /**
-/**
  * Capture full frame (with small margin) for page scanning.
  * Scaled to 1280 px wide — wide enough to read many sticker badges at once.
  */
@@ -256,6 +255,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
   const [scanMode, setScanMode] = useState<'single' | 'page'>('single');
   const [result, setResult] = useState<ScanResult | null>(null);
   const [pageAlbumResult, setPageAlbumResult] = useState<PageAlbumResult | null>(null);
+  const [pageAddedNums, setPageAddedNums] = useState<Set<number>>(new Set());
   const [errorMsg, setErrorMsg] = useState('');
   const [manualCode, setManualCode] = useState('');
   const [showManual, setShowManual] = useState(false);
@@ -447,6 +447,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
   const reset = useCallback(() => {
     setResult(null);
     setPageAlbumResult(null);
+    setPageAddedNums(new Set());
     setShowManual(false);
     setManualCode('');
     setErrorMsg('');
@@ -753,7 +754,9 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
       {/* ── Page result ── */}
       {scanState === 'result' && scanMode === 'page' && pageAlbumResult && (() => {
         const teamSticker = pageAlbumResult.ownedStickers[0] ?? pageAlbumResult.emptyStickers[0];
-        const newStickers = pageAlbumResult.ownedStickers.filter((s) => !owned.has(s.number));
+        const newStickers = pageAlbumResult.ownedStickers.filter(
+          (s) => !owned.has(s.number) && !pageAddedNums.has(s.number),
+        );
         return (
           <div className="flex flex-col flex-1 min-h-0">
             {/* Header */}
@@ -783,7 +786,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
                     Coladas — na sua coleção
                   </p>
                   {pageAlbumResult.ownedStickers.map((sticker) => {
-                    const isNew = !owned.has(sticker.number);
+                    const isNew = !owned.has(sticker.number) && !pageAddedNums.has(sticker.number);
                     return (
                       <div
                         key={sticker.number}
@@ -830,7 +833,11 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
             <div className="flex-shrink-0 bg-zinc-950 px-4 py-4 space-y-2 border-t border-zinc-800">
               {mode === 'adicionar' && newStickers.length > 0 && (
                 <button
-                  onClick={() => onAddMany?.(newStickers.map((s) => s.number))}
+                  onClick={() => {
+                    const nums = newStickers.map((s) => s.number);
+                    onAddMany?.(nums);
+                    setPageAddedNums((prev) => new Set([...prev, ...nums]));
+                  }}
                   className="w-full bg-copa-green text-white font-bold py-4 rounded-2xl text-base active:scale-95 transition-transform"
                 >
                   Adicionar {newStickers.length} figurinha{newStickers.length !== 1 ? 's' : ''} coladas
@@ -844,7 +851,7 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
                   <RefreshCw size={18} /> Nova Leitura
                 </button>
                 <button
-                  onClick={() => { stopCamera(); setScanState('idle'); setPageAlbumResult(null); }}
+                  onClick={() => { stopCamera(); setScanState('idle'); setPageAlbumResult(null); setPageAddedNums(new Set()); }}
                   className="flex-1 bg-zinc-800 text-zinc-300 font-semibold py-3 rounded-xl active:scale-95 transition-transform"
                 >
                   Fechar
