@@ -39,13 +39,13 @@ router.post('/', async (req, res) => {
     );
   } catch (err) {
     console.error('[OCR] Falha na chamada ao Vision API:', err);
-    return res.status(502).json({ error: 'Erro ao contactar o Vision API' });
+    return res.status(502).json({ error: 'Erro ao contactar o Vision API', detail: String(err) });
   }
 
   if (!visionRes.ok) {
     const body = await visionRes.text();
-    console.error('[OCR] Vision API respondeu', visionRes.status, body.slice(0, 200));
-    return res.status(502).json({ error: 'Vision API retornou erro' });
+    console.error('[OCR] Vision API respondeu', visionRes.status, body.slice(0, 400));
+    return res.status(502).json({ error: `Vision API ${visionRes.status}`, detail: body.slice(0, 300) });
   }
 
   const json = await visionRes.json();
