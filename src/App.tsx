@@ -55,6 +55,7 @@ export default function App() {
     retryLoad,
     toggleSticker,
     addSticker,
+    bulkAddStickers,
     totalOwned,
     totalStickers,
     progressPercent,
@@ -159,7 +160,7 @@ export default function App() {
         )}
 
         {activeTab === 'adicionar' && (
-          <CameraScanner mode="adicionar" owned={owned} onAdd={addSticker} token={token} />
+          <CameraScanner mode="adicionar" owned={owned} onAdd={addSticker} onAddMany={bulkAddStickers} token={token} />
         )}
       </main>
 

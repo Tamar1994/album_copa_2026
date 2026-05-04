@@ -16,6 +16,7 @@ interface Props {
   mode: 'verificar' | 'adicionar';
   owned: Set<number>;
   onAdd: (num: number) => void;
+  onAddMany?: (nums: number[]) => void;
   token: string | null;
 }
 
@@ -132,14 +133,70 @@ function extractStickerCode(text: string): string | null {
   return null;
 }
 
+/**
+ * Extract ALL valid sticker codes from text (for page scan mode).
+ * Returns unique codes found, preserving first-found order.
+ */
+function extractAllStickerCodes(text: string): string[] {
+  const upper = text.toUpperCase().replace(/[^A-Z0-9 \n]/g, ' ').replace(/\s+/g, ' ');
+  const found = new Set<string>();
+
+  // Special case: bare "00"
+  if (/\b00\b/.test(upper) && STICKER_CODE_MAP.has('00')) found.add('00');
+
+  const re = /\b([A-Z0-9]{2,3})\s*([0-9]{1,2})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(upper)) !== null) {
+    let added = false;
+    for (const lv of ocrVariants(m[1])) {
+      if (added) break;
+      for (const dv of ocrVariants(m[2])) {
+        const withSpace = `${lv} ${dv}`;
+        const noSpace   = `${lv}${dv}`;
+        if (STICKER_CODE_MAP.has(withSpace)) { found.add(withSpace); added = true; break; }
+        if (STICKER_CODE_MAP.has(noSpace))   { found.add(noSpace);   added = true; break; }
+      }
+    }
+  }
+  return [...found];
+}
+
+/**
+ * Capture full frame (with small margin) for page scanning.
+ * Scaled to 1280 px wide — wide enough to read many sticker badges at once.
+ */
+function preprocessPageCanvas(src: HTMLVideoElement): HTMLCanvasElement {
+  const vw = src.videoWidth;
+  const vh = src.videoHeight;
+
+  // 4 % margin on each side to avoid lens distortion at the edges
+  const cropX = Math.round(vw * 0.04);
+  const cropY = Math.round(vh * 0.04);
+  const cropW = Math.round(vw * 0.92);
+  const cropH = Math.round(vh * 0.92);
+
+  const outW = 1280;
+  const outH = Math.round((outW / cropW) * cropH);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d')!;
+  ctx.filter = 'grayscale(1) contrast(1.6) brightness(1.05)';
+  ctx.drawImage(src, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
+  return canvas;
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
-export function CameraScanner({ mode, owned, onAdd, token }: Props) {
+export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isScanning = useRef(false);
 
   const [scanState, setScanState] = useState<ScanState>('idle');
+  const [scanMode, setScanMode] = useState<'single' | 'page'>('single');
   const [result, setResult] = useState<ScanResult | null>(null);
+  const [pageFound, setPageFound] = useState<Array<{ code: string; sticker: import('../types').Sticker; alreadyOwned: boolean }>>([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [manualCode, setManualCode] = useState('');
   const [showManual, setShowManual] = useState(false);
@@ -255,6 +312,52 @@ export function CameraScanner({ mode, owned, onAdd, token }: Props) {
     setScanState('result');
   }, [manualCode, owned]);
 
+  // ── Page scan OCR ────────────────────────────────────────────────────────
+  const capturePageOCR = useCallback(async () => {
+    if (!videoRef.current || isScanning.current) return;
+    isScanning.current = true;
+    setScanState('scanning');
+    setErrorMsg('');
+
+    try {
+      const canvas = preprocessPageCanvas(videoRef.current);
+      const base64 = canvas.toDataURL('image/jpeg', 0.90).split(',')[1];
+
+      const res = await fetch('/api/ocr/page', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ imageBase64: base64 }),
+      });
+
+      if (!res.ok) throw new Error(`OCR ${res.status}`);
+
+      const { text } = await res.json() as { text: string };
+      const codes = extractAllStickerCodes(text ?? '');
+      console.log('[Vision OCR-page] texto:', JSON.stringify(text?.slice(0, 200)), '→ códigos:', codes);
+
+      if (codes.length > 0) {
+        const found = codes.map((code) => {
+          const sticker = STICKER_CODE_MAP.get(code)!;
+          return { code, sticker, alreadyOwned: owned.has(sticker.number) };
+        });
+        setPageFound(found);
+        setScanState('result');
+      } else {
+        setErrorMsg('Nenhuma figurinha identificada. Ajuste o enquadramento e tente novamente.');
+        setScanState('ready');
+      }
+    } catch (err) {
+      console.error(err);
+      setErrorMsg('Erro ao processar. Verifique a sua ligação.');
+      setScanState('ready');
+    } finally {
+      isScanning.current = false;
+    }
+  }, [token, owned]);
+
   // ── Action (add) ─────────────────────────────────────────────────────────
   const handleAddSticker = useCallback(() => {
     if (!result) return;
@@ -264,6 +367,7 @@ export function CameraScanner({ mode, owned, onAdd, token }: Props) {
 
   const reset = useCallback(() => {
     setResult(null);
+    setPageFound([]);
     setShowManual(false);
     setManualCode('');
     setErrorMsg('');
@@ -344,30 +448,37 @@ export function CameraScanner({ mode, owned, onAdd, token }: Props) {
               {/* Semi-dark vignette so the sticker pops */}
               <div className="absolute inset-0 bg-black/35" />
 
-              {/* Sticker guide — 75 % wide × 60 % tall, centred */}
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-[75%] h-[60%] border-2 border-white/50 rounded-lg relative">
-
-                  {/* Label above the box */}
-                  <span className="absolute -top-5 left-0 right-0 text-center text-[10px] text-white font-semibold">
-                    Encaixe a figurinha aqui
-                  </span>
-
-                  {/* Badge zone highlight — upper-right 40 % × 28 % */}
-                  <div className="absolute top-0 right-0 w-[40%] h-[28%] border-2 border-copa-yellow rounded-tr-md">
-                    {/* Corner tick marks */}
-                    <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-copa-yellow -translate-x-0.5 -translate-y-0.5" />
-                    <span className="absolute -top-4 right-0 text-[9px] text-copa-yellow font-bold whitespace-nowrap">
-                      código ↗
+              {scanMode === 'single' ? (
+                /* Single sticker guide */
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-[75%] h-[60%] border-2 border-white/50 rounded-lg relative">
+                    <span className="absolute -top-5 left-0 right-0 text-center text-[10px] text-white font-semibold">
+                      Encaixe a figurinha aqui
+                    </span>
+                    <div className="absolute top-0 right-0 w-[40%] h-[28%] border-2 border-copa-yellow rounded-tr-md">
+                      <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-copa-yellow -translate-x-0.5 -translate-y-0.5" />
+                      <span className="absolute -top-4 right-0 text-[9px] text-copa-yellow font-bold whitespace-nowrap">
+                        código ↗
+                      </span>
+                    </div>
+                    <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-white/60">
+                      Toque em “Capturar” quando pronto
                     </span>
                   </div>
-
-                  {/* Hint at the bottom */}
-                  <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-white/60">
-                    Toque em “Capturar” quando pronto
-                  </span>
                 </div>
-              </div>
+              ) : (
+                /* Page guide */
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-[92%] h-[92%] border-2 border-copa-yellow rounded-lg relative">
+                    <span className="absolute -top-5 left-0 right-0 text-center text-[10px] text-copa-yellow font-semibold">
+                      Fotografe uma ou duas páginas de figurinhas
+                    </span>
+                    <span className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-white/60">
+                      Toque em “Capturar” quando pronto
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -375,7 +486,9 @@ export function CameraScanner({ mode, owned, onAdd, token }: Props) {
           {scanState === 'scanning' && (
             <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-3 pointer-events-none">
               <Loader2 size={44} className="animate-spin text-copa-green" />
-              <p className="text-white font-semibold text-sm">Identificando figurinha…</p>
+              <p className="text-white font-semibold text-sm">
+                {scanMode === 'page' ? 'Identificando figurinhas na página…' : 'Identificando figurinha…'}
+              </p>
             </div>
           )}
 
@@ -383,6 +496,23 @@ export function CameraScanner({ mode, owned, onAdd, token }: Props) {
 
         {/* Controls */}
         <div className="flex-shrink-0 bg-zinc-950 px-4 pt-4 pb-safe space-y-3">
+          {/* Mode toggle — only in 'adicionar' mode */}
+          {mode === 'adicionar' && (
+            <div className="flex bg-zinc-800 rounded-xl p-1 gap-1">
+              <button
+                onClick={() => setScanMode('single')}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors ${scanMode === 'single' ? 'bg-copa-green text-white' : 'text-zinc-400'}`}
+              >
+                Figurinha
+              </button>
+              <button
+                onClick={() => setScanMode('page')}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors ${scanMode === 'page' ? 'bg-copa-green text-white' : 'text-zinc-400'}`}
+              >
+                Página
+              </button>
+            </div>
+          )}
           {/* Error message from last scan attempt */}
           {errorMsg && !showManual && (
             <p className="text-red-400 text-xs text-center">{errorMsg}</p>
@@ -427,7 +557,7 @@ export function CameraScanner({ mode, owned, onAdd, token }: Props) {
             </button>
 
             <button
-              onClick={capture}
+              onClick={scanMode === 'page' ? capturePageOCR : capture}
               disabled={scanState === 'scanning'}
               className="flex-1 py-4 rounded-2xl font-bold text-base transition-transform active:scale-95 flex items-center justify-center gap-2 bg-copa-green text-white disabled:opacity-60 disabled:scale-100"
             >
@@ -450,7 +580,7 @@ export function CameraScanner({ mode, owned, onAdd, token }: Props) {
       </div>
 
       {/* ── Result ── */}
-      {scanState === 'result' && result && (
+      {scanState === 'result' && result && scanMode === 'single' && (
         <div className="flex flex-col flex-1 items-center justify-center px-6 gap-5">
           {/* Status icon */}
           {isVerify ? (
@@ -529,6 +659,73 @@ export function CameraScanner({ mode, owned, onAdd, token }: Props) {
               </button>
               <button
                 onClick={() => { stopCamera(); setScanState('idle'); setResult(null); }}
+                className="flex-1 bg-zinc-800 text-zinc-300 font-semibold py-3 rounded-xl active:scale-95 transition-transform"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Page result ── */}
+      {scanState === 'result' && scanMode === 'page' && pageFound.length > 0 && (
+        <div className="flex flex-col flex-1 min-h-0">
+          {/* Header */}
+          <div className="flex-shrink-0 px-4 pt-4 pb-2 bg-zinc-950 border-b border-zinc-800">
+            <p className="text-white font-bold text-base">
+              {pageFound.length} figurinha{pageFound.length > 1 ? 's' : ''} encontrada{pageFound.length > 1 ? 's' : ''}
+            </p>
+            <p className="text-zinc-400 text-xs mt-0.5">
+              {pageFound.filter((f) => !f.alreadyOwned).length} nova{pageFound.filter((f) => !f.alreadyOwned).length !== 1 ? 's' : ''} ·{' '}
+              {pageFound.filter((f) => f.alreadyOwned).length} já possu{pageFound.filter((f) => f.alreadyOwned).length === 1 ? 'o' : 'o'}
+            </p>
+          </div>
+
+          {/* Scrollable list */}
+          <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+            {pageFound.map(({ code, sticker, alreadyOwned }) => (
+              <div
+                key={code}
+                className={`flex items-center gap-3 rounded-xl px-3 py-2 ${alreadyOwned ? 'bg-zinc-800/60' : 'bg-copa-green/10 border border-copa-green/30'}`}
+              >
+                <span className={`text-lg ${alreadyOwned ? 'text-zinc-500' : 'text-copa-green'}`}>
+                  {alreadyOwned ? '✓' : '＋'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-white text-sm font-semibold truncate">
+                    {sticker.team ?? sticker.label}
+                  </p>
+                  <p className="text-zinc-400 text-xs">{sticker.code}</p>
+                </div>
+                <span className="text-xs text-zinc-500 flex-shrink-0">#{sticker.number}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex-shrink-0 bg-zinc-950 px-4 py-4 space-y-2 border-t border-zinc-800">
+            {mode === 'adicionar' && pageFound.some((f) => !f.alreadyOwned) && (
+              <button
+                onClick={() => {
+                  const newNums = pageFound.filter((f) => !f.alreadyOwned).map((f) => f.sticker.number);
+                  onAddMany?.(newNums);
+                  setPageFound((prev) => prev.map((f) => ({ ...f, alreadyOwned: true })));
+                }}
+                className="w-full bg-copa-green text-white font-bold py-4 rounded-2xl text-base active:scale-95 transition-transform"
+              >
+                Adicionar {pageFound.filter((f) => !f.alreadyOwned).length} nova{pageFound.filter((f) => !f.alreadyOwned).length !== 1 ? 's' : ''}
+              </button>
+            )}
+            <div className="flex gap-3">
+              <button
+                onClick={reset}
+                className="flex-1 bg-zinc-800 text-zinc-300 font-semibold py-3 rounded-xl flex items-center justify-center gap-2 active:scale-95 transition-transform"
+              >
+                <RefreshCw size={18} /> Nova Leitura
+              </button>
+              <button
+                onClick={() => { stopCamera(); setScanState('idle'); setPageFound([]); }}
                 className="flex-1 bg-zinc-800 text-zinc-300 font-semibold py-3 rounded-xl active:scale-95 transition-transform"
               >
                 Fechar
