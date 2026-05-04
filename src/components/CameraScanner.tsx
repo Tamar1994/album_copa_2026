@@ -608,7 +608,12 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
             </div>
 
             {result.sticker.team && (
-              <p className="font-bold text-white">{result.sticker.team}</p>
+              <p className="font-bold text-white">
+                {result.sticker.team}
+                {result.sticker.teamPt && result.sticker.teamPt !== result.sticker.team && (
+                  <span className="text-zinc-400 font-normal text-sm"> ({result.sticker.teamPt})</span>
+                )}
+              </p>
             )}
             <p className="text-zinc-300 text-sm">{result.sticker.label}</p>
             <p className="text-zinc-500 text-xs">

@@ -9,6 +9,8 @@ export interface Sticker {
   label: string;
   /** Team this sticker belongs to (if applicable) */
   team?: string;
+  /** Team name in Portuguese */
+  teamPt?: string;
   /** Group letter (A-L) */
   group?: string;
   /** Foil / special sticker */
