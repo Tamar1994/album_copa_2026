@@ -201,5 +201,21 @@ export const STICKER_CODE_MAP: Map<string, Sticker> = new Map(
   ALL_SECTIONS.flatMap((s) => s.stickers.map((st) => [st.code, st])),
 );
 
+/**
+ * Map from normalised country name (uppercase, accents removed) → team abbreviation.
+ * Includes both English and Portuguese names so OCR can identify the team
+ * even when all sticker slots are glued (no slot codes visible).
+ */
+export const TEAM_NAME_MAP: Map<string, string> = new Map(
+  TEAMS.flatMap((t) => {
+    const norm = (s: string) =>
+      s.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    return [
+      [norm(t.name), t.abbrev],
+      [norm(t.namePt), t.abbrev],
+    ];
+  }),
+);
+
 
 
