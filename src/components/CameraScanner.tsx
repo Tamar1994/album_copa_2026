@@ -34,7 +34,7 @@ interface ScanResult {
   rawText: string;
 }
 
-type MultiResult = { code: string; sticker: Sticker; alreadyOwned: boolean };
+type MultiResult = { code: string; sticker: Sticker; alreadyOwned: boolean; count: number };
 
 // ─── Image preprocessing helpers ─────────────────────────────────────────────
 /**
@@ -138,11 +138,11 @@ function extractStickerCode(text: string): string | null {
 /**
  * Extract ALL valid sticker codes from text (multi-sticker mode).
  */
-function extractAllStickerCodes(text: string): string[] {
+function extractAllStickerCodes(text: string): Map<string, number> {
   const upper = text.toUpperCase().replace(/[^A-Z0-9 \n]/g, ' ').replace(/\s+/g, ' ');
-  const found = new Set<string>();
+  const found = new Map<string, number>();
 
-  if (/\b00\b/.test(upper) && STICKER_CODE_MAP.has('00')) found.add('00');
+  if (/\b00\b/.test(upper) && STICKER_CODE_MAP.has('00')) found.set('00', (found.get('00') ?? 0) + 1);
 
   const re = /\b([A-Z0-9]{2,3})\s*([0-9]{1,2})\b/g;
   let m: RegExpExecArray | null;
@@ -153,12 +153,12 @@ function extractAllStickerCodes(text: string): string[] {
       for (const dv of ocrVariants(m[2])) {
         const withSpace = `${lv} ${dv}`;
         const noSpace   = `${lv}${dv}`;
-        if (STICKER_CODE_MAP.has(withSpace)) { found.add(withSpace); added = true; break; }
-        if (STICKER_CODE_MAP.has(noSpace))   { found.add(noSpace);   added = true; break; }
+        if (STICKER_CODE_MAP.has(withSpace)) { found.set(withSpace, (found.get(withSpace) ?? 0) + 1); added = true; break; }
+        if (STICKER_CODE_MAP.has(noSpace))   { found.set(noSpace,   (found.get(noSpace)   ?? 0) + 1); added = true; break; }
       }
     }
   }
-  return [...found];
+  return found;
 }
 
 /**
@@ -337,12 +337,12 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
 
       const { text } = await res.json() as { text: string };
       const codes = extractAllStickerCodes(text ?? '');
-      console.log('[Vision OCR-multi]', codes);
+      console.log('[Vision OCR-multi]', [...codes.entries()]);
 
-      if (codes.length > 0) {
-        setMultiFound(codes.map((code) => {
+      if (codes.size > 0) {
+        setMultiFound([...codes.entries()].map(([code, count]) => {
           const sticker = STICKER_CODE_MAP.get(code)!;
-          return { code, sticker, alreadyOwned: owned.has(sticker.number) };
+          return { code, sticker, alreadyOwned: owned.has(sticker.number), count };
         }));
         setScanState('result');
       } else {
@@ -696,15 +696,24 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
 
             {/* List */}
             <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
-              {multiFound.map(({ code, sticker, alreadyOwned }) => {
+              {multiFound.map(({ code, sticker, alreadyOwned, count }) => {
                 const isNew = !alreadyOwned && !multiAddedNums.has(sticker.number);
+                const isRepeat = count > 1;
                 return (
                   <div
                     key={code}
-                    className={`flex items-center gap-3 rounded-xl px-3 py-2 ${isNew ? 'bg-copa-green/10 border border-copa-green/30' : 'bg-zinc-800/60'}`}
+                    className={`flex items-center gap-3 rounded-xl px-3 py-2 ${
+                      isRepeat
+                        ? 'bg-copa-yellow/10 border border-copa-yellow/40'
+                        : isNew
+                        ? 'bg-copa-green/10 border border-copa-green/30'
+                        : 'bg-zinc-800/60'
+                    }`}
                   >
-                    <span className={`text-lg ${isNew ? 'text-copa-green' : 'text-zinc-500'}`}>
-                      {isNew ? '＋' : '✓'}
+                    <span className={`text-lg ${
+                      isRepeat ? 'text-copa-yellow' : isNew ? 'text-copa-green' : 'text-zinc-500'
+                    }`}>
+                      {isRepeat ? '⚠' : isNew ? '＋' : '✓'}
                     </span>
                     <div className="flex-1 min-w-0">
                       <p className="text-white text-sm font-semibold truncate">
@@ -712,7 +721,14 @@ export function CameraScanner({ mode, owned, onAdd, onAddMany, token }: Props) {
                       </p>
                       <p className="text-zinc-400 text-xs">{sticker.label !== (sticker.team ?? '') ? sticker.label + ' · ' : ''}{sticker.code}</p>
                     </div>
-                    <span className="text-xs text-zinc-500 flex-shrink-0">#{sticker.number}</span>
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                      <span className="text-xs text-zinc-500">#{sticker.number}</span>
+                      {isRepeat && (
+                        <span className="text-[10px] font-bold text-copa-yellow bg-copa-yellow/15 px-1.5 py-0.5 rounded-full">
+                          ×{count} repetida
+                        </span>
+                      )}
+                    </div>
                   </div>
                 );
               })}
